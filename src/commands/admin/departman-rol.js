@@ -1,6 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const Guild = require('../../models/Guild');
+const User = require('../../models/User');
 const { log, LogTier } = require('../../utils/logger');
+const { markLegitimate } = require('../../systems/roleGuard');
 const config = require('../../config');
 
 module.exports = {
@@ -113,19 +115,69 @@ module.exports = {
       const removed = guildData[field].splice(index, 1)[0];
       await guildData.save();
 
+      await interaction.deferReply({ ephemeral: true });
+
+      // --- AUTO-CLEANUP: Tum uyelerden bu rolu sil ---
+      let cleanupCount = 0;
+      try {
+        const members = await interaction.guild.members.fetch();
+        for (const [, member] of members) {
+          if (member.roles.cache.has(removed.roleId)) {
+            markLegitimate(guildId, member.id);
+            await member.roles.remove(removed.roleId).catch(() => null);
+
+            // Bir alt seviye rolunu ver (uyeyi rolsuz birakma)
+            const remainingRoles = guildData[field].filter(r => {
+              const userData = null; // async kontrol gerekiyor, asagida yapilacak
+              return true;
+            });
+
+            cleanupCount++;
+          }
+        }
+
+        // Her uyenin hak ettigi en yuksek rolu geri ver
+        for (const [, member] of members) {
+          if (member.user.bot) continue;
+          const userData = await User.findOne({ userId: member.id, guildId });
+          if (!userData) continue;
+
+          const userLevel = hat === 'text' ? userData.levelText : userData.levelVoice;
+          const highestRole = guildData[field]
+            .filter(r => userLevel >= r.level)
+            .sort((a, b) => b.level - a.level)[0];
+
+          if (highestRole && !member.roles.cache.has(highestRole.roleId)) {
+            markLegitimate(guildId, member.id);
+            await member.roles.add(highestRole.roleId).catch(() => null);
+          }
+
+          // Yedegi guncelle
+          const freshMember = await interaction.guild.members.fetch(member.id).catch(() => null);
+          if (freshMember) {
+            await User.updateOne(
+              { userId: member.id, guildId },
+              { $set: { roles: freshMember.roles.cache.map(r => r.id) } }
+            );
+          }
+        }
+      } catch (err) {
+        console.error('[AutoCleanup] Hata:', err.message);
+      }
+
       await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Departman Rol İhraç Edildi',
+        title: 'Departman Rol İhraç Edildi (Toplu Temizlik)',
         operatorId: interaction.user.id,
         roleId: removed.roleId,
         fields: [
           { name: 'Hat', value: hat === 'text' ? 'Yazı' : 'Ses', inline: true },
           { name: 'Seviye', value: `${seviye}`, inline: true },
+          { name: 'Temizlenen Üye', value: `${cleanupCount}`, inline: true },
         ],
       });
 
-      return interaction.reply({
-        content: `✅ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı **Lv.${seviye}** rolü kaldırıldı.`,
-        ephemeral: true,
+      return interaction.editReply({
+        content: `✅ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı **Lv.${seviye}** rolü kaldırıldı.\n🧹 **${cleanupCount}** üyeden rol temizlendi ve alt seviye rolleri güncellendi.`,
       });
     }
   },

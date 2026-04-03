@@ -30,6 +30,7 @@ module.exports = {
       sub.setName('dondur')
         .setDescription('Kullanıcının XP kazanımını dondur/çöz.')
         .addUserOption(opt => opt.setName('kullanici').setDescription('Hedef kullanıcı').setRequired(true))
+        .addIntegerOption(opt => opt.setName('sure').setDescription('Dondurma süresi (saat). Boş bırakılırsa süresiz.').setRequired(false).setMinValue(1))
         .addStringOption(opt => opt.setName('sebep').setDescription('Sebep').setRequired(false))
     )
     .addSubcommand(sub =>
@@ -142,10 +143,13 @@ module.exports = {
 
     if (sub === 'dondur') {
       const target = interaction.options.getUser('kullanici');
+      const sure = interaction.options.getInteger('sure'); // saat cinsinden
       const sebep = interaction.options.getString('sebep') || 'Belirtilmedi';
 
       const userData = await User.findOne({ userId: target.id, guildId });
       const newFrozen = !(userData?.frozen);
+
+      const frozenUntil = (newFrozen && sure) ? new Date(Date.now() + sure * 3600_000) : null;
 
       await User.findOneAndUpdate(
         { userId: target.id, guildId },
@@ -154,22 +158,28 @@ module.exports = {
             frozen: newFrozen,
             frozenBy: newFrozen ? interaction.user.id : null,
             frozenAt: newFrozen ? new Date() : null,
+            frozenUntil,
           },
           $setOnInsert: { userId: target.id, guildId },
         },
         { upsert: true }
       );
 
+      const sureText = sure ? `${sure} saat` : 'Süresiz';
+
       await log(interaction.client, guildId, LogTier.OPERATIONAL, {
         title: newFrozen ? 'Personel Donduruldu' : 'Personel Çözüldü',
         operatorId: interaction.user.id,
         targetId: target.id,
-        fields: [{ name: 'Sebep', value: sebep, inline: false }],
+        fields: [
+          { name: 'Sebep', value: sebep, inline: true },
+          { name: 'Süre', value: newFrozen ? sureText : 'N/A', inline: true },
+        ],
       });
 
       return interaction.reply({
         content: newFrozen
-          ? `❄️ **${target.username}** donduruldu. XP kazanımı durduruldu. Sebep: ${sebep}`
+          ? `❄️ **${target.username}** donduruldu (${sureText}). XP kazanımı durduruldu. Sebep: ${sebep}`
           : `✅ **${target.username}** çözüldü. XP kazanımı tekrar aktif.`,
         ephemeral: true,
       });

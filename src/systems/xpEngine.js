@@ -76,8 +76,18 @@ async function grantTextXP(message, client) {
     { upsert: true, new: true }
   );
 
-  // Dondurulmus mu?
-  if (userData.frozen) return;
+  // Dondurulmus mu? (Sureli dondurma kontrolu)
+  if (userData.frozen) {
+    if (userData.frozenUntil && new Date() > userData.frozenUntil) {
+      // Sure dolmus, otomatik coz
+      await User.updateOne(
+        { userId: author.id, guildId: guild.id },
+        { $set: { frozen: false, frozenBy: null, frozenAt: null, frozenUntil: null } }
+      );
+    } else {
+      return;
+    }
+  }
 
   // Seviye kontrolu
   await checkLevelUp(client, userData, 'text', guild, author);
@@ -104,7 +114,16 @@ async function grantVoiceXP(member, client, minutesInVoice) {
     { upsert: true, new: true }
   );
 
-  if (userData.frozen) return;
+  if (userData.frozen) {
+    if (userData.frozenUntil && new Date() > userData.frozenUntil) {
+      await User.updateOne(
+        { userId: member.id, guildId: member.guild.id },
+        { $set: { frozen: false, frozenBy: null, frozenAt: null, frozenUntil: null } }
+      );
+    } else {
+      return;
+    }
+  }
 
   await checkLevelUp(client, userData, 'voice', member.guild, member.user);
 }

@@ -31,6 +31,7 @@ const userSchema = new mongoose.Schema({
   frozen: { type: Boolean, default: false },
   frozenBy: { type: String, default: null },
   frozenAt: { type: Date, default: null },
+  frozenUntil: { type: Date, default: null }, // null = suresiz, Date = otomatik cozulme
 
   // Sicil kayitlari
   records: [{
