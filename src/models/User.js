@@ -52,6 +52,12 @@ const userSchema = new mongoose.Schema({
   cardTheme: { type: String, default: 'default' },
   cardColor: { type: String, default: '#ffffff' },
   unlockedThemes: [{ type: String }],
+
+  // Cikis/Ban/Atilma korunma sistemi
+  leftAt: { type: Date, default: null },
+  leaveCount: { type: Number, default: 0 },
+  lastKnownRoles: [{ type: String }], // Ayrilma anindaki roller (startingRoles dahil)
+  lastLeaveReason: { type: String, default: null }, // 'leave', 'kick', 'ban'
 }, {
   timestamps: true,
 });
