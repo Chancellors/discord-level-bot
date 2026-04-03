@@ -1,5 +1,6 @@
 const { log, LogTier } = require('../utils/logger');
 const { hasPermission, isDev } = require('../utils/permissions');
+const Guild = require('../models/Guild');
 
 module.exports = {
   name: 'interactionCreate',
@@ -17,6 +18,32 @@ module.exports = {
       });
     }
 
+    // Kullanici kara listesi kontrolu
+    const guildData = await Guild.findOne({ guildId: interaction.guild.id });
+    if (guildData?.userCommandBlacklist?.length) {
+      const isBlacklisted = guildData.userCommandBlacklist.some(
+        b => b.userId === interaction.user.id && b.command === interaction.commandName
+      );
+      if (isBlacklisted && !isDev(interaction.user.id)) {
+        return interaction.reply({
+          content: '🚫 Bu komutu kullanmanız engellenmiştir.',
+          ephemeral: true,
+        });
+      }
+    }
+
+    // Rol kara listesi kontrolu (kara listedeki role sahip kullanicilar user komutlarini kullanamasin)
+    if (command.category === 'user' && guildData?.blacklistedRoles?.length) {
+      const memberRoles = interaction.member.roles.cache.map(r => r.id);
+      const hasBlacklistedRole = guildData.blacklistedRoles.some(r => memberRoles.includes(r));
+      if (hasBlacklistedRole) {
+        return interaction.reply({
+          content: '🚫 Sahip olduğunuz bir rol nedeniyle bu komutu kullanamazsınız.',
+          ephemeral: true,
+        });
+      }
+    }
+
     // Yetki kontrolu (admin komutlari icin)
     if (command.category === 'admin') {
       const allowed = await hasPermission(
@@ -26,7 +53,6 @@ module.exports = {
         interaction.commandName
       );
       if (!allowed) {
-        // Erisim engeli logu
         await log(client, interaction.guild.id, LogTier.SECURITY, {
           title: 'Erişim Engeli',
           description: `Yetkisiz komut denemesi reddedildi.`,

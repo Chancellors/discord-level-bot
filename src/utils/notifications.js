@@ -10,6 +10,9 @@ async function sendLevelUp(client, guildId, user, type, oldLevel, newLevel, oldR
     const guildData = await Guild.findOne({ guildId });
     if (!guildData?.notificationChannel) return;
 
+    // Bildirimler kapali mi?
+    if (guildData.notificationsEnabled === false) return;
+
     const guild = client.guilds.cache.get(guildId);
     if (!guild) return;
 

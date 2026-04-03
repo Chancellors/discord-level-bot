@@ -48,11 +48,19 @@ const guildSchema = new mongoose.Schema({
     allowedRoles: [{ type: String }],
   }],
 
+  // Bildirim sistemi acik/kapali
+  notificationsEnabled: { type: Boolean, default: true },
+
+  // XP kazanmayan roller
+  blacklistedRoles: [{ type: String }],
+
   // Ses kosullari - seviye bazli izinler
   voiceConditions: {
     muteAllowedLevel: { type: Number, default: 0 },
     deafenAllowedLevel: { type: Number, default: 0 },
     soloXpLevel: { type: Number, default: 0 },
+    afkXpAllowed: { type: Boolean, default: false },
+    minUsersForXp: { type: Number, default: 2 },
   },
 
   // Anti-spam ayarlari
@@ -62,6 +70,12 @@ const guildSchema = new mongoose.Schema({
     voiceHopLimit: { type: Number, default: 5 },
     voiceHopWindow: { type: Number, default: 60_000 },
   },
+
+  // Yetki kara listesi - belirli kullanicilarin belirli komutlara erisimini engeller
+  userCommandBlacklist: [{
+    userId: { type: String, required: true },
+    command: { type: String, required: true },
+  }],
 }, {
   timestamps: true,
 });

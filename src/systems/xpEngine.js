@@ -30,6 +30,16 @@ async function grantTextXP(message, client) {
   const guildData = await Guild.findOne({ guildId: guild.id });
   if (guildData?.blacklistedChannels?.includes(channel.id)) return;
 
+  // Rol kara listesi kontrolu
+  if (guildData?.blacklistedRoles?.length) {
+    const member = await guild.members.fetch(author.id).catch(() => null);
+    if (member) {
+      const memberRoles = member.roles.cache.map(r => r.id);
+      const hasBlacklistedRole = guildData.blacklistedRoles.some(r => memberRoles.includes(r));
+      if (hasBlacklistedRole) return;
+    }
+  }
+
   // Cooldown kontrolu
   const cooldownKey = `text_${author.id}_${guild.id}`;
   const now = Date.now();
@@ -101,6 +111,13 @@ async function grantVoiceXP(member, client, minutesInVoice) {
   if (client.maintenanceMode) return;
 
   const guildData = await Guild.findOne({ guildId: member.guild.id });
+
+  // Rol kara listesi kontrolu
+  if (guildData?.blacklistedRoles?.length) {
+    const memberRoles = member.roles.cache.map(r => r.id);
+    const hasBlacklistedRole = guildData.blacklistedRoles.some(r => memberRoles.includes(r));
+    if (hasBlacklistedRole) return;
+  }
 
   const multiplier = guildData?.xpMultiplier || 1.0;
   const xpGain = Math.floor(config.xp.voicePerMinute * minutesInVoice * multiplier);

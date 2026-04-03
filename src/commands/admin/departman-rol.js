@@ -27,6 +27,22 @@ module.exports = {
         .setDescription('Bir seviyedeki rolü kaldır.')
         .addStringOption(opt => opt.setName('hat').setDescription('Hat türü').setRequired(true).addChoices({ name: 'Yazı', value: 'text' }, { name: 'Ses', value: 'voice' }))
         .addIntegerOption(opt => opt.setName('seviye').setDescription('Kaldırılacak seviye').setRequired(true).setMinValue(1))
+    )
+    .addSubcommand(sub =>
+      sub.setName('toplu-ata')
+        .setDescription('Tüm üyelere hak ettikleri seviye rollerini toplu ata.')
+        .addStringOption(opt => opt.setName('hat').setDescription('Hat türü').setRequired(true).addChoices({ name: 'Yazı', value: 'text' }, { name: 'Ses', value: 'voice' }, { name: 'Her İkisi', value: 'both' }))
+    )
+    .addSubcommand(sub =>
+      sub.setName('kontrol')
+        .setDescription('Seviye-rol uyumsuzluklarını tespit et (düzeltmeden).')
+        .addStringOption(opt => opt.setName('hat').setDescription('Hat türü').setRequired(true).addChoices({ name: 'Yazı', value: 'text' }, { name: 'Ses', value: 'voice' }))
+    )
+    .addSubcommand(sub =>
+      sub.setName('temizle')
+        .setDescription('Bir hattaki TÜM seviye rollerini sıfırla.')
+        .addStringOption(opt => opt.setName('hat').setDescription('Hat türü').setRequired(true).addChoices({ name: 'Yazı', value: 'text' }, { name: 'Ses', value: 'voice' }))
+        .addStringOption(opt => opt.setName('onay').setDescription('"ONAYLA" yazın').setRequired(true))
     ),
 
   async execute(interaction) {
@@ -45,17 +61,14 @@ module.exports = {
 
       const field = hat === 'text' ? 'levelRolesText' : 'levelRolesVoice';
 
-      // Ayni seviyede zaten rol var mi?
       const existing = guildData[field].find(r => r.level === seviye);
       if (existing) {
-        // Guncelle
         existing.roleId = rol.id;
         existing.name = rol.name;
       } else {
         guildData[field].push({ level: seviye, roleId: rol.id, name: rol.name });
       }
 
-      // Seviyeye gore sirala
       guildData[field].sort((a, b) => a.level - b.level);
       await guildData.save();
 
@@ -80,9 +93,10 @@ module.exports = {
 
       const buildSchema = (roles, title) => {
         if (!roles.length) return `**${title}:** Henüz rol tanımlı değil.`;
-        return `**${title}:**\n` + roles.map(r => {
+        return `**${title}:**\n` + roles.map((r, i) => {
           const role = interaction.guild.roles.cache.get(r.roleId);
-          return `Lv.**${r.level}** → ${role ? role.toString() : `\`${r.roleId}\` (Silinmiş?)`}`;
+          const arrow = i < roles.length - 1 ? '├' : '└';
+          return `${arrow} Lv.**${r.level}** → ${role ? role.toString() : `\`${r.roleId}\` (Silinmiş?)`}`;
         }).join('\n');
       };
 
@@ -93,11 +107,27 @@ module.exports = {
         .setFooter({ text: 'Evil Mega Corp // Admin Panel' });
 
       if (!hat || hat === 'text') {
-        embed.addFields({ name: '📝 Yazı Hattı', value: buildSchema(guildData.levelRolesText, 'Yazı'), inline: false });
+        embed.addFields({
+          name: `📝 Yazı Hattı (${guildData.levelRolesText.length} kademe)`,
+          value: buildSchema(guildData.levelRolesText, 'Yazı'),
+          inline: false,
+        });
       }
       if (!hat || hat === 'voice') {
-        embed.addFields({ name: '🎙️ Ses Hattı', value: buildSchema(guildData.levelRolesVoice, 'Ses'), inline: false });
+        embed.addFields({
+          name: `🎙️ Ses Hattı (${guildData.levelRolesVoice.length} kademe)`,
+          value: buildSchema(guildData.levelRolesVoice, 'Ses'),
+          inline: false,
+        });
       }
+
+      // Toplam atanan seviye sayisi
+      const totalRoles = guildData.levelRolesText.length + guildData.levelRolesVoice.length;
+      embed.addFields({
+        name: '📈 Özet',
+        value: `Toplam **${totalRoles}** kademe tanımlı.`,
+        inline: false,
+      });
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
@@ -125,13 +155,6 @@ module.exports = {
           if (member.roles.cache.has(removed.roleId)) {
             markLegitimate(guildId, member.id);
             await member.roles.remove(removed.roleId).catch(() => null);
-
-            // Bir alt seviye rolunu ver (uyeyi rolsuz birakma)
-            const remainingRoles = guildData[field].filter(r => {
-              const userData = null; // async kontrol gerekiyor, asagida yapilacak
-              return true;
-            });
-
             cleanupCount++;
           }
         }
@@ -178,6 +201,180 @@ module.exports = {
 
       return interaction.editReply({
         content: `✅ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı **Lv.${seviye}** rolü kaldırıldı.\n🧹 **${cleanupCount}** üyeden rol temizlendi ve alt seviye rolleri güncellendi.`,
+      });
+    }
+
+    if (sub === 'toplu-ata') {
+      const hat = interaction.options.getString('hat');
+      await interaction.deferReply({ ephemeral: true });
+
+      const hats = hat === 'both' ? ['text', 'voice'] : [hat];
+      let totalUpdated = 0;
+      let totalSkipped = 0;
+
+      for (const h of hats) {
+        const field = h === 'text' ? 'levelRolesText' : 'levelRolesVoice';
+        const roleList = guildData[field];
+        if (!roleList.length) continue;
+
+        const members = await interaction.guild.members.fetch();
+        for (const [, member] of members) {
+          if (member.user.bot) continue;
+
+          const userData = await User.findOne({ userId: member.id, guildId });
+          if (!userData) { totalSkipped++; continue; }
+
+          const userLevel = h === 'text' ? userData.levelText : userData.levelVoice;
+
+          // Hak ettigi en yuksek rol
+          const qualifiedRole = roleList
+            .filter(r => userLevel >= r.level)
+            .sort((a, b) => b.level - a.level)[0];
+
+          if (!qualifiedRole) continue;
+
+          // Daha dusuk rolleri kaldir
+          for (const r of roleList) {
+            if (r.roleId !== qualifiedRole.roleId && member.roles.cache.has(r.roleId)) {
+              markLegitimate(guildId, member.id);
+              await member.roles.remove(r.roleId).catch(() => null);
+            }
+          }
+
+          // Hak ettigi rolu ekle
+          if (!member.roles.cache.has(qualifiedRole.roleId)) {
+            markLegitimate(guildId, member.id);
+            await member.roles.add(qualifiedRole.roleId).catch(() => null);
+            totalUpdated++;
+          }
+
+          // Rol yedegini guncelle
+          const freshMember = await interaction.guild.members.fetch(member.id).catch(() => null);
+          if (freshMember) {
+            await User.updateOne(
+              { userId: member.id, guildId },
+              { $set: { roles: freshMember.roles.cache.map(r => r.id) } }
+            );
+          }
+        }
+      }
+
+      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
+        title: 'Toplu Rol Atama Tamamlandı',
+        operatorId: interaction.user.id,
+        fields: [
+          { name: 'Hat', value: hat === 'both' ? 'Yazı + Ses' : (hat === 'text' ? 'Yazı' : 'Ses'), inline: true },
+          { name: 'Güncellenen', value: `${totalUpdated}`, inline: true },
+          { name: 'Atlanan', value: `${totalSkipped}`, inline: true },
+        ],
+      });
+
+      return interaction.editReply({
+        content: `✅ Toplu rol atama tamamlandı.\n📊 **${totalUpdated}** üye güncellendi, **${totalSkipped}** üye atlandı (kayıt yok).`,
+      });
+    }
+
+    if (sub === 'kontrol') {
+      const hat = interaction.options.getString('hat');
+      await interaction.deferReply({ ephemeral: true });
+
+      const field = hat === 'text' ? 'levelRolesText' : 'levelRolesVoice';
+      const roleList = guildData[field];
+
+      if (!roleList.length) {
+        return interaction.editReply({ content: `❌ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı için tanımlı rol yok.` });
+      }
+
+      const mismatches = [];
+      const members = await interaction.guild.members.fetch();
+
+      for (const [, member] of members) {
+        if (member.user.bot) continue;
+
+        const userData = await User.findOne({ userId: member.id, guildId });
+        if (!userData) continue;
+
+        const userLevel = hat === 'text' ? userData.levelText : userData.levelVoice;
+        const qualifiedRole = roleList
+          .filter(r => userLevel >= r.level)
+          .sort((a, b) => b.level - a.level)[0];
+
+        // Mevcut seviye rolleri
+        const currentLevelRoles = roleList.filter(r => member.roles.cache.has(r.roleId));
+
+        const hasCorrectRole = qualifiedRole && member.roles.cache.has(qualifiedRole.roleId);
+        const hasExtraRoles = currentLevelRoles.length > 1;
+        const missingRole = qualifiedRole && !hasCorrectRole;
+
+        if (missingRole || hasExtraRoles) {
+          const expected = qualifiedRole ? `Lv.${qualifiedRole.level}` : 'Yok';
+          const current = currentLevelRoles.map(r => `Lv.${r.level}`).join(', ') || 'Yok';
+          mismatches.push(`<@${member.id}> — Beklenen: **${expected}** | Mevcut: **${current}**`);
+        }
+
+        if (mismatches.length >= 20) break; // Limit
+      }
+
+      if (!mismatches.length) {
+        return interaction.editReply({ content: `✅ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattında uyumsuzluk bulunamadı.` });
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(config.colors.security)
+        .setTitle(`⚠️ Rol Uyumsuzluk Raporu — ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı`)
+        .setDescription(mismatches.join('\n'))
+        .setFooter({ text: `${mismatches.length} uyumsuzluk tespit edildi • Düzeltmek için /departman-rol toplu-ata` })
+        .setTimestamp();
+
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    if (sub === 'temizle') {
+      const hat = interaction.options.getString('hat');
+      const onay = interaction.options.getString('onay');
+
+      if (onay !== 'ONAYLA') {
+        return interaction.reply({ content: '⚠️ Bu işlem geri alınamaz! Onaylamak için `ONAYLA` yazın.', ephemeral: true });
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const field = hat === 'text' ? 'levelRolesText' : 'levelRolesVoice';
+      const roleList = [...guildData[field]];
+      const removedCount = roleList.length;
+
+      // Tum uyelerden bu rolleri kaldir
+      let cleanupCount = 0;
+      try {
+        const members = await interaction.guild.members.fetch();
+        for (const [, member] of members) {
+          for (const r of roleList) {
+            if (member.roles.cache.has(r.roleId)) {
+              markLegitimate(guildId, member.id);
+              await member.roles.remove(r.roleId).catch(() => null);
+              cleanupCount++;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[BulkCleanup] Hata:', err.message);
+      }
+
+      guildData[field] = [];
+      await guildData.save();
+
+      await log(interaction.client, guildId, LogTier.SECURITY, {
+        title: 'Departman Rol Şeması Sıfırlandı',
+        operatorId: interaction.user.id,
+        fields: [
+          { name: 'Hat', value: hat === 'text' ? 'Yazı' : 'Ses', inline: true },
+          { name: 'Kaldırılan Kademe', value: `${removedCount}`, inline: true },
+          { name: 'Temizlenen Rol', value: `${cleanupCount}`, inline: true },
+        ],
+      });
+
+      return interaction.editReply({
+        content: `✅ ${hat === 'text' ? 'Yazı' : 'Ses'} Hattı rol şeması tamamen sıfırlandı.\n🗑️ **${removedCount}** kademe silindi, **${cleanupCount}** rol üyelerden kaldırıldı.`,
       });
     }
   },
