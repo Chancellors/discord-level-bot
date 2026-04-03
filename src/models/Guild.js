@@ -76,6 +76,43 @@ const guildSchema = new mongoose.Schema({
     userId: { type: String, required: true },
     command: { type: String, required: true },
   }],
+
+  // --- Karsilayici Sistemi ---
+  welcomeEnabled: { type: Boolean, default: false },
+  welcomeChannel: { type: String, default: null },
+  welcomeMessage: {
+    type: String,
+    default: `**:wave: Merhaba [user], Evil Mega Corp'a hoş geldin!**
+Burası **[server]** oyun ve topluluk sunucusu.
+Şu an topluluğumuz **[memberCount]** üyeden oluşuyor.
+
+*:black_joker: Sunucuda rol sistemi kullanıyoruz:*
+
+**:crown: Admin / Yönetim (High Deck):**
+*Deck Sovereign, Arcane Crown, Void Emperor, Eclipse Judge, Veil Warden*
+
+**:shield: Mod / Gözetmen (Court Deck):**
+*Solar Herald, Lunar Herald, Gate Warden, Card Sentinel, Spread Marshal*
+
+**:flower_playing_cards: Üye / Prestij (Living Cards):**
+*Toplam 10 seviye üye rolü bulunuyor.*
+
+*Sunucuya katıldığında **"Blank Sigil"** rolüyle başlıyorsun.*
+*:speech_balloon: Discord'da sohbet ederek, :headphones: ses kanallarında vakit geçirerek ve :date: etkinliklere katılarak diğer üye rollerine (**First Draw, Minor Omen, Fatebound, Deck Disciple, Arcane Adept, Card Knight, Soul Reader, Inner Oracle, Living Major**) yükselebilirsin.*
+
+:unlock: Mührün ve Prestij kaydın arttıkça daha fazla yetki, özel kanallar ve çeşitli avantajlar açılacak.
+
+:question: **Herhangi bir sorunda yetkililere yazman yeterli.**
+:video_game: **İyi eğlenceler!**`,
+  },
+  welcomeSendDM: { type: Boolean, default: false }, // DM olarak mi kanala mi
+
+  leaveEnabled: { type: Boolean, default: false },
+  leaveChannel: { type: String, default: null }, // ayri kanal (log kanali vb.)
+  leaveMessage: {
+    type: String,
+    default: "[server]'dan [user]([userName]) ayrıldı",
+  },
 }, {
   timestamps: true,
 });

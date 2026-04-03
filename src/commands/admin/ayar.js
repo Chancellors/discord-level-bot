@@ -111,6 +111,15 @@ module.exports = {
             inline: false,
           },
           {
+            name: '👋 Karşılayıcı Sistemi',
+            value: [
+              `**Hoş Geldin:** ${guildData.welcomeEnabled ? '✅ Açık' : '❌ Kapalı'}${guildData.welcomeChannel ? ` → <#${guildData.welcomeChannel}>` : ''}`,
+              `**Gönderim:** ${guildData.welcomeSendDM ? '📬 DM' : '📢 Kanal'}`,
+              `**Ayrılma:** ${guildData.leaveEnabled ? '✅ Açık' : '❌ Kapalı'}${guildData.leaveChannel ? ` → <#${guildData.leaveChannel}>` : ''}`,
+            ].join('\n'),
+            inline: false,
+          },
+          {
             name: '🎙️ Ses Koşulları',
             value: [
               `**Mute İzin Seviyesi:** Lv.${guildData.voiceConditions?.muteAllowedLevel || 0}`,

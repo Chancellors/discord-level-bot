@@ -3,6 +3,44 @@ const User = require('../models/User');
 const { log, LogTier } = require('../utils/logger');
 const { markLegitimate } = require('../systems/roleGuard');
 
+/**
+ * Karsilayici degiskenlerini uygula
+ */
+function applyWelcomeVars(template, member) {
+  return template
+    .replace(/\[user\]/g, `<@${member.id}>`)
+    .replace(/\[userName\]/g, member.user.username)
+    .replace(/\[memberCount\]/g, `${member.guild.memberCount}`)
+    .replace(/\[server\]/g, member.guild.name);
+}
+
+/**
+ * Hosgeldin mesaji gonder
+ */
+async function sendWelcome(member, guildData) {
+  if (!guildData?.welcomeEnabled) return;
+  if (!guildData.welcomeMessage) return;
+
+  const message = applyWelcomeVars(guildData.welcomeMessage, member);
+
+  // DM mi kanala mi?
+  if (guildData.welcomeSendDM) {
+    try {
+      await member.send(message);
+    } catch {
+      // DM kapali olabilir, kanala yaz fallback
+      if (guildData.welcomeChannel) {
+        const channel = member.guild.channels.cache.get(guildData.welcomeChannel);
+        if (channel) await channel.send(message).catch(() => null);
+      }
+    }
+  } else {
+    if (!guildData.welcomeChannel) return;
+    const channel = member.guild.channels.cache.get(guildData.welcomeChannel);
+    if (channel) await channel.send(message).catch(() => null);
+  }
+}
+
 module.exports = {
   name: 'guildMemberAdd',
   async execute(member, client) {
@@ -22,7 +60,6 @@ module.exports = {
         if (userData.lastKnownRoles?.length) {
           for (const roleId of userData.lastKnownRoles) {
             const role = member.guild.roles.cache.get(roleId);
-            // Rolun hala sunucuda var oldugundan ve @everyone olmadigindan emin ol
             if (role && role.id !== guildId && !role.managed) {
               try {
                 markLegitimate(guildId, member.id);
@@ -46,7 +83,6 @@ module.exports = {
 
             if (!roleList.length) continue;
 
-            // Hak ettigi en yuksek seviye rolu
             const qualifiedRole = roleList
               .filter(r => userLevel >= r.level)
               .sort((a, b) => b.level - a.level)[0];
@@ -57,16 +93,14 @@ module.exports = {
                 try {
                   markLegitimate(guildId, member.id);
                   await member.roles.add(role);
-                  if (!restoredRoles.includes(qualifiedRole.roleId)) {
-                    restoredRoles.push(qualifiedRole.roleId);
-                  }
+                  restoredRoles.push(qualifiedRole.roleId);
                 } catch {
                   failedRoles.push(qualifiedRole.roleId);
                 }
               }
             }
 
-            // Hak etmedigi seviye rollerini cikar (baskasi arada eklemis olabilir)
+            // Hak etmedigi seviye rollerini cikar
             for (const r of roleList) {
               if (r.roleId !== qualifiedRole?.roleId && member.roles.cache.has(r.roleId)) {
                 markLegitimate(guildId, member.id);
@@ -138,7 +172,6 @@ module.exports = {
           },
         ];
 
-        // Dondurulmus muydu?
         if (userData.frozen) {
           fields.push({
             name: '❄️ Dondurma Durumu',
@@ -147,7 +180,6 @@ module.exports = {
           });
         }
 
-        // Onceki ayrilma sebebi
         const prevReason = {
           leave: 'Kendi isteğiyle ayrılmıştı',
           kick: 'Sunucudan atılmıştı',
@@ -169,6 +201,8 @@ module.exports = {
           fields,
         });
 
+        // Geri donen uye icin de hosgeldin mesaji gonder
+        await sendWelcome(member, guildData);
         return;
       }
 
@@ -211,6 +245,9 @@ module.exports = {
           },
         ] : [],
       });
+
+      // Hosgeldin mesaji gonder
+      await sendWelcome(member, guildData);
     } catch (err) {
       console.error('[guildMemberAdd] Hata:', err.message);
     }

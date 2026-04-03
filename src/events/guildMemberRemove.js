@@ -108,6 +108,21 @@ module.exports = {
         targetId: member.id,
         fields,
       });
+
+      // --- AYRILMA MESAJI ---
+      const guildData = await Guild.findOne({ guildId });
+      if (guildData?.leaveEnabled && guildData.leaveChannel && guildData.leaveMessage) {
+        const leaveMsg = guildData.leaveMessage
+          .replace(/\[user\]/g, `<@${member.id}>`)
+          .replace(/\[userName\]/g, member.user.username)
+          .replace(/\[memberCount\]/g, `${member.guild.memberCount}`)
+          .replace(/\[server\]/g, member.guild.name);
+
+        const channel = member.guild.channels.cache.get(guildData.leaveChannel);
+        if (channel) {
+          await channel.send(leaveMsg).catch(() => null);
+        }
+      }
     } catch (err) {
       console.error('[guildMemberRemove] Hata:', err.message);
     }
