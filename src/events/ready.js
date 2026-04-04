@@ -17,13 +17,30 @@ module.exports = {
     // Slash komutlari kaydet
     const commands = client.commands.map(c => c.data.toJSON());
     const rest = new REST({ version: '10' }).setToken(config.token);
+    const clientId = config.clientId || client.user.id;
 
+    console.log(`[Deploy] Client ID: ${clientId}`);
+    console.log(`[Deploy] ${commands.length} komut kaydediliyor...`);
+
+    // Her sunucuya guild-specific kaydet (aninda guncellenir)
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        await rest.put(
+          Routes.applicationGuildCommands(clientId, guild.id),
+          { body: commands }
+        );
+        console.log(`[Deploy] ${guild.name} (${guild.id}) icin ${commands.length} komut kaydedildi.`);
+      } catch (err) {
+        console.error(`[Deploy] ${guild.name} komut kaydi basarisiz:`, err.message);
+      }
+    }
+
+    // Ayrica global olarak da kaydet (yeni sunucular icin)
     try {
-      console.log(`[Deploy] ${commands.length} komut kaydediliyor...`);
-      await rest.put(Routes.applicationCommands(config.clientId), { body: commands });
-      console.log('[Deploy] Komutlar basariyla kaydedildi.');
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      console.log('[Deploy] Global komutlar da kaydedildi.');
     } catch (err) {
-      console.error('[Deploy] Komut kaydi basarisiz:', err.message);
+      console.error('[Deploy] Global komut kaydi basarisiz:', err.message);
     }
 
     // Role Guard baslat
