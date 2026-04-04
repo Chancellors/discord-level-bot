@@ -18,11 +18,11 @@ async function initializeDatabase() {
       notification_channel VARCHAR(20),
       welcome_enabled BOOLEAN DEFAULT false,
       welcome_channel VARCHAR(20),
-      welcome_message TEXT DEFAULT $1,
+      welcome_message TEXT DEFAULT 'Hosgeldin [user]! [server] sunucusuna katildin.\n\nBurada sesli ve yazili kanallarda aktif olarak seviye kazanabilir, ozel roller acabilirsin.\n\nIyi eglenceler ve basarilar dileriz!',
       welcome_send_dm BOOLEAN DEFAULT false,
       leave_enabled BOOLEAN DEFAULT false,
       leave_channel VARCHAR(20),
-      leave_message TEXT DEFAULT $2,
+      leave_message TEXT DEFAULT '[server]''dan [user]([userName]) ayrildi',
       notifications_enabled BOOLEAN DEFAULT true,
       notification_template_text TEXT,
       notification_template_voice TEXT,
@@ -39,7 +39,7 @@ async function initializeDatabase() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
-  `, [DEFAULT_WELCOME_MESSAGE, DEFAULT_LEAVE_MESSAGE]);
+  `);
 
   await query(`
     CREATE TABLE IF NOT EXISTS users (
