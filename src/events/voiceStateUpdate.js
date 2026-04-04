@@ -2,6 +2,9 @@ const { grantVoiceXP } = require('../systems/xpEngine');
 const antiSpam = require('../systems/antiSpam');
 const cache = require('../cache/manager');
 
+// Periyodik XP zamanlayici referansi
+let voiceXpInterval = null;
+
 module.exports = {
   name: 'voiceStateUpdate',
   async execute(oldState, newState, client) {
@@ -14,7 +17,15 @@ module.exports = {
     const userId = member.id;
     const sessionKey = `${userId}_${guildId}`;
 
-    // Kanala katildi
+    // ─── Periyodik XP zamanlayicisini baslat (bir kez) ──────────────
+    if (!voiceXpInterval) {
+      voiceXpInterval = setInterval(async () => {
+        await grantPeriodicVoiceXP(client);
+      }, 60_000); // Her 60 saniye
+      console.log('[Voice] Periyodik XP zamanlayicisi baslatildi (60sn).');
+    }
+
+    // ─── Kanala katildi ─────────────────────────────────────────────
     if (!oldState.channel && newState.channel) {
       client.voiceSessions.set(sessionKey, {
         joinedAt: Date.now(),
@@ -24,7 +35,7 @@ module.exports = {
       return;
     }
 
-    // Kanaldan ayrildi
+    // ─── Kanaldan ayrildi ───────────────────────────────────────────
     if (oldState.channel && !newState.channel) {
       const session = client.voiceSessions.get(sessionKey);
       if (session) {
@@ -43,47 +54,73 @@ module.exports = {
       return;
     }
 
-    // Kanal degistirdi
+    // ─── Kanal degistirdi (switch veya JTC bot tasiması) ────────────
     if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
-      // Voice hop kontrolu
-      const guildData = await cache.getGuild(guildId);
-      if (guildData?.anti_spam_enabled) {
-        const isHopping = antiSpam.checkVoiceHop(userId, guildId, guildData);
-        if (isHopping) return;
-      }
-
-      // Eski kanaldan XP ver
       const session = client.voiceSessions.get(sessionKey);
-      if (session) {
-        const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
-        if (minutes >= 1) {
-          await grantVoiceXP(member, client, minutes, oldState);
+
+      // JTC bot korumasi: 10 saniye icinde tasindiysa hop olarak sayma
+      const timeSinceJoin = session ? Date.now() - session.joinedAt : Infinity;
+      const isJtcMove = timeSinceJoin < 10_000; // 10 saniye icinde tasindi = JTC
+
+      if (!isJtcMove) {
+        // Voice hop kontrolu (sadece JTC degilse)
+        const guildData = await cache.getGuild(guildId);
+        if (guildData?.anti_spam_enabled) {
+          const isHopping = antiSpam.checkVoiceHop(userId, guildId, guildData);
+          if (isHopping) return;
+        }
+
+        // Eski kanaldan XP ver
+        if (session) {
+          const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
+          if (minutes >= 1) {
+            await grantVoiceXP(member, client, minutes, oldState);
+          }
         }
       }
 
-      // Yeni oturum baslat
+      // Yeni oturum baslat (kanal guncelle)
       client.voiceSessions.set(sessionKey, {
-        joinedAt: Date.now(),
+        joinedAt: isJtcMove ? (session?.joinedAt || Date.now()) : Date.now(),
         channelId: newState.channel.id,
-        lastXpAt: Date.now(),
+        lastXpAt: isJtcMove ? (session?.lastXpAt || Date.now()) : Date.now(),
       });
       return;
     }
-
-    // Periyodik XP verme (her dakika tetiklenir)
-    const session = client.voiceSessions.get(sessionKey);
-    if (session && newState.channel) {
-      const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
-      if (minutes >= 1) {
-        const guildData = await cache.getGuild(guildId);
-        const minUsers = guildData?.voice_min_users || 2;
-        const channelMembers = newState.channel.members.filter(m => !m.user.bot).size;
-
-        if (channelMembers >= minUsers) {
-          await grantVoiceXP(member, client, minutes, newState);
-          session.lastXpAt = Date.now();
-        }
-      }
-    }
   },
 };
+
+// ─── Her dakika tum aktif ses kullanicilarini tarayip XP ver ─────────────────
+async function grantPeriodicVoiceXP(client) {
+  for (const [sessionKey, session] of client.voiceSessions.entries()) {
+    const [userId, guildId] = sessionKey.split('_');
+    const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
+    if (minutes < 1) continue;
+
+    try {
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) continue;
+
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (!member || member.user.bot) continue;
+
+      const voiceState = member.voice;
+      if (!voiceState?.channel) {
+        // Artik seste degil, oturumu temizle
+        client.voiceSessions.delete(sessionKey);
+        continue;
+      }
+
+      const guildData = await cache.getGuild(guildId);
+      const minUsers = guildData?.voice_min_users || 2;
+      const channelMembers = voiceState.channel.members.filter(m => !m.user.bot).size;
+
+      if (channelMembers >= minUsers || (guildData?.voice_afk_xp_allowed && voiceState.channel.id === guild.afkChannelId)) {
+        await grantVoiceXP(member, client, minutes, voiceState);
+        session.lastXpAt = Date.now();
+      }
+    } catch (err) {
+      console.error(`[Voice] Periyodik XP hatasi (${sessionKey}):`, err.message);
+    }
+  }
+}

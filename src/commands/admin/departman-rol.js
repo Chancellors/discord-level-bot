@@ -14,8 +14,12 @@ module.exports = {
     .addSubcommand(sub => sub.setName('sema').setDescription('Tüm seviye rollerini hiyerarşi olarak göster.'))
     .addSubcommand(sub =>
       sub.setName('ihrac')
-        .setDescription('Bir seviye rol tanımını kaldır.')
-        .addRoleOption(opt => opt.setName('rol').setDescription('Kaldırılacak rol').setRequired(true)))
+        .setDescription('Bir seviye rol tanımını tamamen sil.')
+        .addRoleOption(opt => opt.setName('rol').setDescription('Silinecek rol').setRequired(true)))
+    .addSubcommand(sub =>
+      sub.setName('sifirla')
+        .setDescription('Bir rolü sıfırla — tekrar /rol-tanimla ile ilk kez tanımlanmış gibi eklenebilir.')
+        .addRoleOption(opt => opt.setName('rol').setDescription('Sıfırlanacak rol').setRequired(true)))
     .addSubcommand(sub => sub.setName('toplu-ata').setDescription('Tüm üyelere mevcut XP\'lerine göre doğru rolleri ata.'))
     .addSubcommand(sub =>
       sub.setName('kontrol')
@@ -56,12 +60,37 @@ module.exports = {
 
     if (sub === 'ihrac') {
       const role = interaction.options.getRole('rol');
-      await queries.removeLevelRole(guildId, role.id);
-      await interaction.reply({ content: `✅ **${role.name}** seviye rol tanımı kaldırıldı.`, ephemeral: true });
+      const removed = await queries.removeLevelRole(guildId, role.id);
+      if (!removed) {
+        return interaction.reply({ content: `❌ **${role.name}** zaten tanımlı değil.`, ephemeral: true });
+      }
+      await interaction.reply({ content: `✅ **${role.name}** seviye rol tanımı tamamen silindi. Tekrar eklemek için \`/rol-tanimla\` kullanabilirsiniz.`, ephemeral: true });
 
       log(client, guildId, LogTier.OPERATIONAL, {
-        title: 'Rol Tanımı Kaldırıldı',
-        description: `${role.name} seviye rol tanımı silindi.`,
+        title: 'Rol Tanımı Silindi',
+        description: `${role.name} seviye rol tanımı tamamen silindi.`,
+        operatorId: interaction.user.id,
+        roleId: role.id,
+      });
+      return;
+    }
+
+    if (sub === 'sifirla') {
+      const role = interaction.options.getRole('rol');
+      const removed = await queries.removeLevelRole(guildId, role.id);
+      if (!removed) {
+        return interaction.reply({ content: `❌ **${role.name}** zaten tanımlı değil.`, ephemeral: true });
+      }
+      await interaction.reply({
+        content: `✅ **${role.name}** sıfırlandı ve silindi.\n\n` +
+          `Şimdi \`/rol-tanimla\` ile tekrar tanımlayabilirsiniz. ` +
+          `İlk kez tanımlanıyormuş gibi mevcut rol sahiplerine retroaktif XP verilecektir.`,
+        ephemeral: true,
+      });
+
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Rol Sıfırlandı',
+        description: `${role.name} sıfırlandı — tekrar tanımlanmayı bekliyor.`,
         operatorId: interaction.user.id,
         roleId: role.id,
       });
@@ -112,7 +141,7 @@ module.exports = {
             }
           }
 
-          // Also assign starter roles (level 0)
+          // Starter rolleri ata
           const starterRoles = levelRoles.filter(lr => lr.ses_level === 0 && lr.yazi_level === 0);
           for (const sr of starterRoles) {
             if (!member.roles.cache.has(sr.role_id)) {
