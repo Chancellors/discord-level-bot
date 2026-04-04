@@ -1,274 +1,262 @@
 const config = require('../config');
-const User = require('../models/User');
-const Guild = require('../models/Guild');
+const cache = require('../cache/manager');
 const { log, LogTier } = require('../utils/logger');
 const notifications = require('../utils/notifications');
+const antiSpam = require('./antiSpam');
+const db = require('../database/queries');
 
-/**
- * XP Engine - Progresif zorluk formuluyle seviye hesaplama
- * Formula: 5 * (L^2) + 50 * L + 100
- */
+// ─── Seviye Hesaplama ─────────────────────────────────────────────────────────
 
-/**
- * Belirli bir seviye icin gereken toplam XP
- */
-function xpForLevel(level) {
-  return config.xpFormula(level);
+function xpForLevel(level) { return level * config.xp.perLevel; }
+function levelForXP(xp) { return Math.floor(xp / config.xp.perLevel); }
+
+// ─── Carpan Zinciri ───────────────────────────────────────────────────────────
+
+function calculateMultipliers(guildData, voiceState) {
+  const breakdown = { night: 1, event: 1, stream: 1, passive: 1 };
+  let isPassive = false;
+
+  // Pasiflik kontrolu (AFK / sagir)
+  if (voiceState) {
+    const inAfk = voiceState.channel?.id === voiceState.guild?.afkChannelId;
+    if (voiceState.deaf || voiceState.selfDeaf || inAfk) {
+      breakdown.passive = config.passiveMultiplier;
+      isPassive = true;
+    }
+  }
+
+  // Gece carpani (pasif olanlara uygulanmaz)
+  if (config.isNightTime() && !isPassive) {
+    breakdown.night = config.nightMultiplier;
+  }
+
+  // Etkinlik carpani
+  if (guildData && guildData.etkinlik_carpani > 1) {
+    if (!guildData.etkinlik_bitisi || new Date(guildData.etkinlik_bitisi) > new Date()) {
+      breakdown.event = guildData.etkinlik_carpani;
+    } else {
+      // Etkinlik suresi dolmus, sifirla
+      cache.updateGuildField(guildData.guild_id, 'etkinlik_carpani', 1.0);
+      cache.updateGuildField(guildData.guild_id, 'etkinlik_bitisi', null);
+    }
+  }
+
+  // Yayin/kamera carpani (pasif olanlara uygulanmaz)
+  if (voiceState && !isPassive) {
+    if (voiceState.streaming || voiceState.selfVideo) {
+      breakdown.stream = config.streamMultiplier;
+    }
+  }
+
+  const total = breakdown.night * breakdown.event * breakdown.stream * breakdown.passive;
+  return { total, breakdown };
 }
 
-/**
- * Yazi XP kazanimi islemi
- */
+// ─── Yazi XP ──────────────────────────────────────────────────────────────────
+
 async function grantTextXP(message, client) {
   const { author, guild, channel } = message;
-  if (author.bot || !guild) return;
+  if (author.bot || !guild || client.maintenanceMode) return;
 
-  // Bakim modu kontrolu
-  if (client.maintenanceMode) return;
+  const guildData = await cache.getGuild(guild.id);
+  if (!guildData) return;
 
-  // Kara liste kontrolu
-  const guildData = await Guild.findOne({ guildId: guild.id });
-  if (guildData?.blacklistedChannels?.includes(channel.id)) return;
+  // Kara liste kanal kontrolu
+  const blChannels = await db.getBlacklistedChannels(guild.id);
+  if (blChannels.some(c => c.channel_id === channel.id)) return;
 
-  // Rol kara listesi kontrolu
-  if (guildData?.blacklistedRoles?.length) {
-    const member = await guild.members.fetch(author.id).catch(() => null);
-    if (member) {
-      const memberRoles = member.roles.cache.map(r => r.id);
-      const hasBlacklistedRole = guildData.blacklistedRoles.some(r => memberRoles.includes(r));
-      if (hasBlacklistedRole) return;
-    }
+  // Kara liste rol kontrolu
+  const blRoles = await db.getBlacklistedRoles(guild.id);
+  if (blRoles.length > 0) {
+    const memberRoles = message.member?.roles?.cache?.map(r => r.id) || [];
+    if (blRoles.some(r => memberRoles.includes(r.role_id))) return;
   }
 
-  // Cooldown kontrolu
-  const cooldownKey = `text_${author.id}_${guild.id}`;
-  const now = Date.now();
-  const lastXp = client.cooldowns.get(cooldownKey);
-  if (lastXp && now - lastXp < config.xp.textCooldown) return;
+  // Kullanici verisi
+  const userData = await cache.getUser(author.id, guild.id);
+  if (!userData) return;
 
-  // Anti-spam kontrolu
-  if (guildData?.antiSpam?.enabled) {
-    const spamKey = `spam_${author.id}_${guild.id}`;
-    const spamData = client.cooldowns.get(spamKey) || { count: 0, resetAt: now + 60_000 };
-    if (now > spamData.resetAt) {
-      spamData.count = 0;
-      spamData.resetAt = now + 60_000;
-    }
-    spamData.count++;
-    client.cooldowns.set(spamKey, spamData);
-
-    if (spamData.count > (guildData.antiSpam.maxMessagesPerMinute || 15)) {
-      await log(client, guild.id, LogTier.SECURITY, {
-        title: 'Anti-Spam Tetiklendi',
-        description: `${author.tag} yazi spam limiti asti.`,
-        operatorId: 'SYSTEM',
-        targetId: author.id,
-        channelId: channel.id,
-      });
-      return;
-    }
-  }
-
-  client.cooldowns.set(cooldownKey, now);
-
-  // XP miktari hesapla (carpanli)
-  const multiplier = guildData?.xpMultiplier || 1.0;
-  const baseXp = Math.floor(Math.random() * (config.xp.textMax - config.xp.textMin + 1)) + config.xp.textMin;
-  const xpGain = Math.floor(baseXp * multiplier);
-
-  // Kullanici verisini guncelle
-  let userData = await User.findOneAndUpdate(
-    { userId: author.id, guildId: guild.id },
-    {
-      $inc: { xpText: xpGain, totalMessagesText: 1 },
-      $setOnInsert: { userId: author.id, guildId: guild.id },
-    },
-    { upsert: true, new: true }
-  );
-
-  // Dondurulmus mu? (Sureli dondurma kontrolu)
-  if (userData.frozen) {
-    if (userData.frozenUntil && new Date() > userData.frozenUntil) {
-      // Sure dolmus, otomatik coz
-      await User.updateOne(
-        { userId: author.id, guildId: guild.id },
-        { $set: { frozen: false, frozenBy: null, frozenAt: null, frozenUntil: null } }
-      );
+  // Askiya alinmis mi?
+  if (userData.askida) {
+    if (userData.askiya_bitis && new Date() > new Date(userData.askiya_bitis)) {
+      userData.askida = false;
+      userData.askiya_alan = null;
+      userData.askiya_tarihi = null;
+      userData.askiya_bitis = null;
+      cache.setUser(author.id, guild.id, userData);
     } else {
       return;
     }
   }
 
-  // Seviye kontrolu
-  await checkLevelUp(client, userData, 'text', guild, author);
+  // Anti-spam
+  const spamCheck = antiSpam.checkTextSpam(author.id, guild.id, message.content, guildData);
+  if (!spamCheck.allowed || spamCheck.validWords === 0) return;
+
+  // XP hesapla
+  const baseXP = spamCheck.validWords * config.xp.textPerWord;
+  const { total } = calculateMultipliers(guildData, null);
+  const finalXP = Math.floor(baseXP * total);
+
+  const oldLevel = userData.level_yazi;
+  userData.total_words_text = (userData.total_words_text || 0) + spamCheck.validWords;
+  cache.setUser(author.id, guild.id, userData);
+  cache.addUserXP(author.id, guild.id, 'xp_yazi', finalXP);
+
+  const newLevel = levelForXP((userData.xp_yazi || 0));
+  if (newLevel > oldLevel) {
+    await handleLevelUp(client, author.id, guild.id, 'yazi', oldLevel, newLevel);
+  }
 }
 
-/**
- * Ses XP kazanimi islemi (voiceStateUpdate ile tetiklenir)
- */
-async function grantVoiceXP(member, client, minutesInVoice) {
-  if (member.user.bot) return;
-  if (client.maintenanceMode) return;
+// ─── Ses XP ───────────────────────────────────────────────────────────────────
 
-  const guildData = await Guild.findOne({ guildId: member.guild.id });
+async function grantVoiceXP(member, client, minutes, voiceState) {
+  if (member.user.bot || client.maintenanceMode) return;
 
-  // Rol kara listesi kontrolu
-  if (guildData?.blacklistedRoles?.length) {
+  const guildData = await cache.getGuild(member.guild.id);
+  if (!guildData) return;
+
+  // Kara liste rol kontrolu
+  const blRoles = await db.getBlacklistedRoles(member.guild.id);
+  if (blRoles.length > 0) {
     const memberRoles = member.roles.cache.map(r => r.id);
-    const hasBlacklistedRole = guildData.blacklistedRoles.some(r => memberRoles.includes(r));
-    if (hasBlacklistedRole) return;
+    if (blRoles.some(r => memberRoles.includes(r.role_id))) return;
   }
 
-  const multiplier = guildData?.xpMultiplier || 1.0;
-  const xpGain = Math.floor(config.xp.voicePerMinute * minutesInVoice * multiplier);
+  const userData = await cache.getUser(member.id, member.guild.id);
+  if (!userData) return;
 
-  let userData = await User.findOneAndUpdate(
-    { userId: member.id, guildId: member.guild.id },
-    {
-      $inc: { xpVoice: xpGain, totalMinutesVoice: minutesInVoice },
-      $setOnInsert: { userId: member.id, guildId: member.guild.id },
-    },
-    { upsert: true, new: true }
-  );
-
-  if (userData.frozen) {
-    if (userData.frozenUntil && new Date() > userData.frozenUntil) {
-      await User.updateOne(
-        { userId: member.id, guildId: member.guild.id },
-        { $set: { frozen: false, frozenBy: null, frozenAt: null, frozenUntil: null } }
-      );
+  if (userData.askida) {
+    if (userData.askiya_bitis && new Date() > new Date(userData.askiya_bitis)) {
+      userData.askida = false;
+      userData.askiya_alan = null;
+      userData.askiya_tarihi = null;
+      userData.askiya_bitis = null;
+      cache.setUser(member.id, member.guild.id, userData);
     } else {
       return;
     }
   }
 
-  await checkLevelUp(client, userData, 'voice', member.guild, member.user);
+  const baseXP = minutes * config.xp.voicePerMinute;
+  const { total } = calculateMultipliers(guildData, voiceState);
+  const finalXP = Math.floor(baseXP * total);
+
+  const oldLevel = userData.level_ses;
+  userData.total_minutes_voice = (userData.total_minutes_voice || 0) + minutes;
+  cache.setUser(member.id, member.guild.id, userData);
+  cache.addUserXP(member.id, member.guild.id, 'xp_ses', finalXP);
+
+  const newLevel = levelForXP((userData.xp_ses || 0));
+  if (newLevel > oldLevel) {
+    await handleLevelUp(client, member.id, member.guild.id, 'ses', oldLevel, newLevel);
+  }
 }
 
-/**
- * Vergi (penalti) uygulama - AFK/mute/deafen
- */
-async function applyTax(client, member, reason, amount) {
-  const userData = await User.findOneAndUpdate(
-    { userId: member.id, guildId: member.guild.id },
-    {
-      $inc: { xpVoice: -amount },
-      $push: { taxHistory: { amount, reason } },
-    },
-    { new: true }
-  );
+// ─── Seviye Atlama ────────────────────────────────────────────────────────────
 
-  if (userData && userData.xpVoice < 0) {
-    await User.updateOne(
-      { userId: member.id, guildId: member.guild.id },
-      { $set: { xpVoice: 0 } }
-    );
+async function handleLevelUp(client, userId, guildId, hat, oldLevel, newLevel) {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return;
+
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return;
+
+  const userData = await cache.getUser(userId, guildId);
+  if (!userData) return;
+
+  const levelRoles = await db.getLevelRoles(guildId);
+  if (!levelRoles.length) return;
+
+  // Kullanicinin hak ettigi en yuksek rolu bul
+  let qualifiedRole = null;
+  let oldRoleName = 'Yok';
+  let newRoleName = 'Yok';
+
+  const { markLegitimate } = require('./roleGuard');
+
+  for (const role of levelRoles) {
+    let qualifies = false;
+
+    if (role.mod === 'birlesik') {
+      const combinedXP = (userData.xp_ses || 0) + (userData.xp_yazi || 0);
+      const combinedLevel = levelForXP(combinedXP);
+      const requiredLevel = Math.max(role.ses_level || 0, role.yazi_level || 0);
+      qualifies = combinedLevel >= requiredLevel;
+    } else {
+      // ayri mod
+      if (hat === 'ses' && role.ses_level !== null) {
+        qualifies = (userData.level_ses || 0) >= role.ses_level;
+      } else if (hat === 'yazi' && role.yazi_level !== null) {
+        qualifies = (userData.level_yazi || 0) >= role.yazi_level;
+      }
+    }
+
+    if (qualifies) qualifiedRole = role;
   }
 
-  await log(client, member.guild.id, LogTier.PERSONNEL, {
-    title: 'Vergi Kesintisi',
-    description: `**${member.user.tag}** vergilendirildi.`,
-    targetId: member.id,
+  if (!qualifiedRole) return;
+
+  // Eski seviye rollerini kaldir, yenisini ver
+  for (const role of levelRoles) {
+    if (role.role_id !== qualifiedRole.role_id && member.roles.cache.has(role.role_id)) {
+      const oldRole = guild.roles.cache.get(role.role_id);
+      if (oldRole) oldRoleName = oldRole.name;
+      markLegitimate(guildId, userId);
+      await member.roles.remove(role.role_id).catch(() => null);
+    }
+  }
+
+  if (!member.roles.cache.has(qualifiedRole.role_id)) {
+    markLegitimate(guildId, userId);
+    await member.roles.add(qualifiedRole.role_id).catch(() => null);
+    const newRole = guild.roles.cache.get(qualifiedRole.role_id);
+    if (newRole) newRoleName = newRole.name;
+  } else {
+    return; // Zaten dogru rol var
+  }
+
+  // Rol yedeklerini guncelle
+  const freshMember = await guild.members.fetch(userId).catch(() => null);
+  if (freshMember) {
+    userData.roles = JSON.stringify(freshMember.roles.cache.map(r => r.id));
+    cache.setUser(userId, guildId, userData);
+    await cache.flushCritical(userId, guildId);
+  }
+
+  // Kariyer sicili
+  await db.addKariyerSicili(userId, guildId, {
+    eski_rol: oldRoleName,
+    yeni_rol: newRoleName,
+    eski_level: oldLevel,
+    yeni_level: newLevel,
+    hat,
+    gecen_sure_gun: null,
+    toplam_aktif_dakika: userData.total_minutes_voice || 0,
+  });
+
+  // Log
+  await log(client, guildId, LogTier.PERSONNEL, {
+    title: `Seviye Atlama (${hat === 'ses' ? 'Ses' : hat === 'yazi' ? 'Yazı' : 'Birleşik'} Hattı)`,
+    description: `**${member.user.tag}** seviye atladı!`,
+    targetId: userId,
     fields: [
-      { name: 'Miktar', value: `-${amount} XP`, inline: true },
-      { name: 'Sebep', value: reason, inline: true },
+      { name: 'Eski Seviye', value: `${oldLevel}`, inline: true },
+      { name: 'Yeni Seviye', value: `${newLevel}`, inline: true },
+      { name: 'Yeni Rol', value: newRoleName, inline: true },
     ],
   });
+
+  // Bildirim
+  await notifications.sendLevelUp(client, guildId, member.user, hat, oldLevel, newLevel, oldRoleName, newRoleName);
 }
 
-/**
- * Seviye atlama kontrolu ve rol guncelleme
- */
-async function checkLevelUp(client, userData, type, guild, user) {
-  const xpField = type === 'text' ? 'xpText' : 'xpVoice';
-  const levelField = type === 'text' ? 'levelText' : 'levelVoice';
-  const currentXp = userData[xpField];
-  const currentLevel = userData[levelField];
-  const requiredXp = xpForLevel(currentLevel);
-
-  if (currentXp < requiredXp) return;
-
-  // Seviye atla
-  const newLevel = currentLevel + 1;
-  const remainingXp = currentXp - requiredXp;
-
-  await User.updateOne(
-    { userId: user.id, guildId: guild.id },
-    { $set: { [levelField]: newLevel, [xpField]: remainingXp } }
-  );
-
-  // Rol guncelleme
-  const guildData = await Guild.findOne({ guildId: guild.id });
-  const roleList = type === 'text' ? guildData?.levelRolesText : guildData?.levelRolesVoice;
-
-  if (roleList?.length) {
-    const member = await guild.members.fetch(user.id).catch(() => null);
-    if (!member) return;
-
-    // Eski seviye rolunu bul ve sil
-    const oldRoleEntry = roleList.find(r => r.level === currentLevel);
-    const newRoleEntry = roleList.find(r => r.level === newLevel);
-
-    let oldRoleName = 'Yok';
-    let newRoleName = 'Yok';
-
-    if (oldRoleEntry) {
-      await member.roles.remove(oldRoleEntry.roleId).catch(() => null);
-      const oldRole = guild.roles.cache.get(oldRoleEntry.roleId);
-      oldRoleName = oldRole?.name || oldRoleEntry.name || oldRoleEntry.roleId;
-    }
-
-    if (newRoleEntry) {
-      await member.roles.add(newRoleEntry.roleId).catch(() => null);
-      const newRole = guild.roles.cache.get(newRoleEntry.roleId);
-      newRoleName = newRole?.name || newRoleEntry.name || newRoleEntry.roleId;
-    }
-
-    // Rol yedegini guncelle
-    const freshMember = await guild.members.fetch(user.id).catch(() => null);
-    if (freshMember) {
-      await User.updateOne(
-        { userId: user.id, guildId: guild.id },
-        { $set: { roles: freshMember.roles.cache.map(r => r.id) } }
-      );
-    }
-
-    // Prestij gecmisine ekle
-    await User.updateOne(
-      { userId: user.id, guildId: guild.id },
-      {
-        $push: {
-          prestigeHistory: {
-            type,
-            oldLevel: currentLevel,
-            newLevel,
-            oldRole: oldRoleName,
-            newRole: newRoleName,
-          },
-        },
-      }
-    );
-
-    // Log
-    await log(client, guild.id, LogTier.PERSONNEL, {
-      title: `Seviye Atlama (${type === 'text' ? 'Yazı' : 'Ses'} Hattı)`,
-      description: `**${user.tag}** seviye atladi!`,
-      targetId: user.id,
-      fields: [
-        { name: 'Eski Seviye', value: `${currentLevel}`, inline: true },
-        { name: 'Yeni Seviye', value: `${newLevel}`, inline: true },
-        { name: 'Eski Rol', value: oldRoleName, inline: true },
-        { name: 'Yeni Rol', value: newRoleName, inline: true },
-      ],
-    });
-
-    // Bildirim gonder
-    await notifications.sendLevelUp(client, guild.id, user, type, currentLevel, newLevel, oldRoleName, newRoleName);
-  }
-
-  // Tekrar kontrol (birden fazla seviye atlama)
-  const updatedUser = await User.findOne({ userId: user.id, guildId: guild.id });
-  await checkLevelUp(client, updatedUser, type, guild, user);
-}
-
-module.exports = { grantTextXP, grantVoiceXP, applyTax, xpForLevel, checkLevelUp };
+module.exports = {
+  calculateMultipliers,
+  grantTextXP,
+  grantVoiceXP,
+  handleLevelUp,
+  xpForLevel,
+  levelForXP,
+};

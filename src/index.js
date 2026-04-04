@@ -1,9 +1,13 @@
-require('dotenv/config');
+require('dotenv').config();
+
 const { Client, GatewayIntentBits, Collection, Partials } = require('discord.js');
-const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const { initializeDatabase } = require('./database/schema');
+const cache = require('./cache/manager');
+
+// ─── Client ──────────────────────────────────────────────────────────────────
 
 const client = new Client({
   intents: [
@@ -14,71 +18,98 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildModeration,
   ],
-  partials: [Partials.GuildMember],
+  partials: [Partials.GuildMember, Partials.User],
 });
 
+// ─── Collections ─────────────────────────────────────────────────────────────
+
 client.commands = new Collection();
-client.cooldowns = new Collection();
-client.voiceSessions = new Collection(); // Ses oturumu takibi
-client.ghostMode = new Set(); // Hayalet mod aktif dev ID'leri
+client.voiceSessions = new Map();
+client.ghostMode = new Set();
 client.maintenanceMode = false;
 
-// --- Komut Yukleme ---
-function loadCommands(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      loadCommands(fullPath);
-    } else if (entry.name.endsWith('.js')) {
-      const command = require(fullPath);
-      if (command.data && command.execute) {
-        client.commands.set(command.data.name, command);
-      }
+// ─── Load Commands ───────────────────────────────────────────────────────────
+
+const commandFolders = fs.readdirSync(path.join(__dirname, 'commands'));
+for (const folder of commandFolders) {
+  const commandPath = path.join(__dirname, 'commands', folder);
+  if (!fs.statSync(commandPath).isDirectory()) continue;
+
+  const commandFiles = fs.readdirSync(commandPath).filter(f => f.endsWith('.js'));
+  for (const file of commandFiles) {
+    const command = require(path.join(commandPath, file));
+    if (command.data && command.execute) {
+      client.commands.set(command.data.name, command);
+      console.log(`[Loader] Komut yuklendi: /${command.data.name}`);
     }
   }
 }
 
-loadCommands(path.join(__dirname, 'commands'));
+// ─── Load Events ─────────────────────────────────────────────────────────────
 
-// --- Event Yukleme ---
-const eventsPath = path.join(__dirname, 'events');
-if (fs.existsSync(eventsPath)) {
-  for (const file of fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'))) {
-    const event = require(path.join(eventsPath, file));
-    if (event.once) {
-      client.once(event.name, (...args) => event.execute(...args, client));
-    } else {
-      client.on(event.name, (...args) => event.execute(...args, client));
-    }
+const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(f => f.endsWith('.js'));
+for (const file of eventFiles) {
+  const event = require(path.join(__dirname, 'events', file));
+  if (event.once) {
+    client.once(event.name, (...args) => event.execute(...args, client));
+  } else {
+    client.on(event.name, (...args) => event.execute(...args, client));
   }
+  console.log(`[Loader] Event yuklendi: ${event.name}`);
 }
 
-// --- Sistem Yukleme ---
-const systemsPath = path.join(__dirname, 'systems');
-if (fs.existsSync(systemsPath)) {
-  for (const file of fs.readdirSync(systemsPath).filter(f => f.endsWith('.js'))) {
-    const system = require(path.join(systemsPath, file));
-    if (typeof system.init === 'function') {
-      system.init(client);
-    }
-  }
-}
+// ─── Startup ─────────────────────────────────────────────────────────────────
 
-// --- MongoDB Baglantisi & Bot Baslatma ---
 async function start() {
   try {
-    await mongoose.connect(config.mongoUri);
-    console.log('[MongoDB] Baglanti basarili.');
+    console.log('[Bot] Evil Mega Corp baslatiliyor...');
 
+    // Initialize database
+    await initializeDatabase();
+
+    // Login
     await client.login(config.token);
-    console.log(`[Bot] ${client.user.tag} olarak giris yapildi.`);
   } catch (err) {
-    console.error('[FATAL] Baslangic hatasi:', err);
+    console.error('[Bot] Baslangic hatasi:', err);
     process.exit(1);
   }
 }
 
-start();
+// ─── Graceful Shutdown ───────────────────────────────────────────────────────
 
-module.exports = client;
+async function shutdown(signal) {
+  console.log(`[Bot] ${signal} sinyali alindi. Kapatiliyor...`);
+
+  try {
+    await cache.shutdown();
+  } catch (err) {
+    console.error('[Bot] Cache kapatma hatasi:', err.message);
+  }
+
+  try {
+    client.destroy();
+  } catch (err) {
+    console.error('[Bot] Client kapatma hatasi:', err.message);
+  }
+
+  console.log('[Bot] Evil Mega Corp kapatildi.');
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('message', msg => {
+  if (msg === 'shutdown') shutdown('PM2');
+});
+
+// Unhandled errors
+process.on('unhandledRejection', err => {
+  console.error('[Bot] Unhandled rejection:', err);
+});
+
+process.on('uncaughtException', err => {
+  console.error('[Bot] Uncaught exception:', err);
+  shutdown('EXCEPTION');
+});
+
+start();

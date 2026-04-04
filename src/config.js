@@ -1,36 +1,47 @@
-module.exports = {
-  devIds: process.env.DEV_IDS?.split(',').map(id => id.trim()) || [],
-  mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/evil-mega-corp',
+const config = {
+  token: process.env.BOT_TOKEN,
   clientId: process.env.CLIENT_ID,
-  token: process.env.DISCORD_TOKEN,
+  devIds: (process.env.DEV_IDS || '').split(',').map((id) => id.trim()).filter(Boolean),
 
-  // XP formula: 5 * (level^2) + 50 * level + 100
-  xpFormula: (level) => 5 * (level ** 2) + 50 * level + 100,
+  db: {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT, 10) || 5432,
+    database: process.env.DB_NAME || 'evil_mega_corp',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+  },
 
-  // XP kazanim ayarlari
+  timezoneOffset: parseInt(process.env.TIMEZONE_OFFSET, 10) || 3,
+
   xp: {
-    textMin: 15,
-    textMax: 25,
-    textCooldown: 60_000, // 60 saniye
-    voicePerMinute: 10,
-    voiceInterval: 60_000, // 60 saniye
+    voicePerMinute: 15,
+    textPerWord: 5,
+    perLevel: 100,
   },
 
-  // Vergi sistemi - AFK/pasiflik cezasi
-  tax: {
-    afkPenaltyPerMinute: 2,
-    mutePenaltyMultiplier: 0.5, // mute iken XP carpani
-    deafPenaltyMultiplier: 0,   // deafen iken XP yok
+  nightHours: {
+    start: 0,
+    end: 8,
   },
 
-  // Embed renkleri
+  nightMultiplier: 2,
+  streamMultiplier: 1.2,
+  passiveMultiplier: 0.5,
+
   colors: {
-    success: 0x00ff00,
-    info: 0x3498db,
-    warning: 0xf39c12,
-    error: 0xe74c3c,
-    critical: 0xff0000,
-    shadow: 0x9b59b6,
-    prestige: 0xffd700,
+    personnel: '#2ecc71',
+    operational: '#f39c12',
+    security: '#e74c3c',
+    shadow: '#9b59b6',
+    prestige: '#e91e63',
+    info: '#3498db',
+  },
+
+  isNightTime() {
+    const now = new Date();
+    const localHour = (now.getUTCHours() + config.timezoneOffset + 24) % 24;
+    return localHour >= config.nightHours.start && localHour < config.nightHours.end;
   },
 };
+
+module.exports = config;

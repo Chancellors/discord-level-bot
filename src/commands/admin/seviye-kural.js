@@ -1,181 +1,108 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const Guild = require('../../models/Guild');
-const { log, LogTier } = require('../../utils/logger');
+const cache = require('../../cache/manager');
 const config = require('../../config');
+const { log, LogTier } = require('../../utils/logger');
 
 module.exports = {
   category: 'admin',
   data: new SlashCommandBuilder()
     .setName('seviye-kural')
-    .setDescription('Seviye bazlı ses izinlerini ve XP koşullarını yönetin.')
+    .setDescription('Seviye ve XP kurallarını yapılandır.')
     .addSubcommand(sub =>
-      sub.setName('ayarla')
-        .setDescription('Ses koşullarını ayarlayın.')
-        .addStringOption(opt =>
-          opt.setName('kosul')
-            .setDescription('Koşul türü')
-            .setRequired(true)
-            .addChoices(
-              { name: 'Mute İzin Seviyesi', value: 'muteAllowedLevel' },
-              { name: 'Deafen İzin Seviyesi', value: 'deafenAllowedLevel' },
-              { name: 'Solo XP Seviyesi', value: 'soloXpLevel' },
-              { name: 'Min. Kişi Sayısı', value: 'minUsersForXp' }
-            )
-        )
-        .addIntegerOption(opt => opt.setName('deger').setDescription('Değer (seviye veya kişi sayısı)').setRequired(true).setMinValue(0))
-    )
+      sub.setName('ses-sessiz')
+        .setDescription('Ses kanalında sessiz kullanıcıların XP alabilmesi için minimum seviye.')
+        .addIntegerOption(opt => opt.setName('seviye').setDescription('Minimum seviye').setRequired(true).setMinValue(0)))
     .addSubcommand(sub =>
-      sub.setName('afk-xp')
-        .setDescription('AFK kanalında XP kazanımını açar veya kapatır.')
-        .addBooleanOption(opt => opt.setName('aktif').setDescription('AFK kanalında XP kazanılsın mı?').setRequired(true))
-    )
+      sub.setName('ses-sagir')
+        .setDescription('Ses kanalında sağır kullanıcıların XP alabilmesi için minimum seviye.')
+        .addIntegerOption(opt => opt.setName('seviye').setDescription('Minimum seviye').setRequired(true).setMinValue(0)))
     .addSubcommand(sub =>
-      sub.setName('listele')
-        .setDescription('Mevcut tüm ses koşullarını detaylı listele.')
-    )
+      sub.setName('ses-hop-limit')
+        .setDescription('Ses kanalı hop spam limiti.')
+        .addIntegerOption(opt => opt.setName('sayi').setDescription('Maksimum hop sayısı').setRequired(true).setMinValue(1)))
     .addSubcommand(sub =>
-      sub.setName('sifirla')
-        .setDescription('Tüm ses koşullarını fabrika ayarlarına sıfırla.')
-    ),
+      sub.setName('spam-mesaj-limit')
+        .setDescription('Anti-spam maksimum mesaj limiti.')
+        .addIntegerOption(opt => opt.setName('sayi').setDescription('Maksimum mesaj sayısı').setRequired(true).setMinValue(1)))
+    .addSubcommand(sub =>
+      sub.setName('goster')
+        .setDescription('Mevcut seviye kurallarını göster.')),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guild.id;
+    const guildData = await cache.getGuild(guildId);
 
-    let guildData = await Guild.findOne({ guildId });
-    if (!guildData) guildData = await Guild.create({ guildId });
+    if (sub === 'ses-sessiz') {
+      const seviye = interaction.options.getInteger('seviye');
+      guildData.voice_mute_allowed_level = seviye;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: `✅ Sessiz kullanıcı XP seviyesi **${seviye}** olarak ayarlandı.`, ephemeral: true });
 
-    if (sub === 'ayarla') {
-      const kosul = interaction.options.getString('kosul');
-      const deger = interaction.options.getInteger('deger');
-
-      if (kosul === 'minUsersForXp') {
-        guildData.voiceConditions.minUsersForXp = deger;
-      } else {
-        guildData.voiceConditions[kosul] = deger;
-      }
-      await guildData.save();
-
-      const kosulNames = {
-        muteAllowedLevel: 'Mute İzin Seviyesi',
-        deafenAllowedLevel: 'Deafen İzin Seviyesi',
-        soloXpLevel: 'Solo XP Seviyesi',
-        minUsersForXp: 'Min. Kişi Sayısı',
-      };
-
-      const kosulDescriptions = {
-        muteAllowedLevel: `Lv.${deger} altındaki üyeler mikrofon kapatınca XP kazanamaz`,
-        deafenAllowedLevel: `Lv.${deger} altındaki üyeler kulaklık kapatınca XP kazanamaz`,
-        soloXpLevel: `Lv.${deger} altındaki üyeler odada tek başınayken XP kazanamaz`,
-        minUsersForXp: `XP kazanmak için odada en az ${deger} kişi olmalı`,
-      };
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
+      log(client, guildId, LogTier.OPERATIONAL, {
         title: 'Seviye Kuralı Güncellendi',
+        description: `Ses sessiz minimum seviye: ${seviye}`,
         operatorId: interaction.user.id,
-        fields: [
-          { name: 'Koşul', value: kosulNames[kosul], inline: true },
-          { name: 'Yeni Değer', value: `${deger}`, inline: true },
-        ],
       });
-
-      return interaction.reply({
-        content: `✅ **${kosulNames[kosul]}** → **${deger}** olarak ayarlandı.\n📋 ${kosulDescriptions[kosul]}`,
-        ephemeral: true,
-      });
+      return;
     }
 
-    if (sub === 'afk-xp') {
-      const aktif = interaction.options.getBoolean('aktif');
-      guildData.voiceConditions.afkXpAllowed = aktif;
-      await guildData.save();
+    if (sub === 'ses-sagir') {
+      const seviye = interaction.options.getInteger('seviye');
+      guildData.voice_deafen_allowed_level = seviye;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: `✅ Sağır kullanıcı XP seviyesi **${seviye}** olarak ayarlandı.`, ephemeral: true });
 
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Seviye Kuralı Güncellendi: AFK XP',
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Seviye Kuralı Güncellendi',
+        description: `Ses sağır minimum seviye: ${seviye}`,
         operatorId: interaction.user.id,
-        fields: [{ name: 'Durum', value: aktif ? '✅ Açık' : '❌ Kapalı', inline: true }],
       });
-
-      return interaction.reply({
-        content: aktif
-          ? '✅ AFK kanalında XP kazanımı **açıldı**. Üyeler AFK odasında da XP kazanabilir.'
-          : '✅ AFK kanalında XP kazanımı **kapatıldı**. AFK odasında XP kazanılamayacak.',
-        ephemeral: true,
-      });
+      return;
     }
 
-    if (sub === 'listele') {
-      const vc = guildData.voiceConditions;
+    if (sub === 'ses-hop-limit') {
+      const sayi = interaction.options.getInteger('sayi');
+      guildData.anti_spam_voice_hop_limit = sayi;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: `✅ Ses hop limiti **${sayi}** olarak ayarlandı.`, ephemeral: true });
 
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Seviye Kuralı Güncellendi',
+        description: `Ses hop limiti: ${sayi}`,
+        operatorId: interaction.user.id,
+      });
+      return;
+    }
+
+    if (sub === 'spam-mesaj-limit') {
+      const sayi = interaction.options.getInteger('sayi');
+      guildData.anti_spam_max_messages = sayi;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: `✅ Spam mesaj limiti **${sayi}** olarak ayarlandı.`, ephemeral: true });
+
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Seviye Kuralı Güncellendi',
+        description: `Spam mesaj limiti: ${sayi}`,
+        operatorId: interaction.user.id,
+      });
+      return;
+    }
+
+    if (sub === 'goster') {
       const embed = new EmbedBuilder()
         .setColor(config.colors.info)
-        .setTitle('🎙️ Evil Mega Corp // Ses Koşulları Detayı')
+        .setTitle('📏 Evil Mega Corp // Seviye Kuralları')
         .addFields(
-          {
-            name: '🔇 Mikrofon (Mute) Kuralı',
-            value: [
-              `**İzin Seviyesi:** Lv.${vc.muteAllowedLevel || 0}`,
-              vc.muteAllowedLevel > 0
-                ? `⚠️ Lv.${vc.muteAllowedLevel} altındaki üyeler mikrofon kapatınca XP kazanamaz`
-                : '✅ Tüm seviyeler mikrofon kapalıyken XP kazanabilir',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: '🔕 Kulaklık (Deafen) Kuralı',
-            value: [
-              `**İzin Seviyesi:** Lv.${vc.deafenAllowedLevel || 0}`,
-              vc.deafenAllowedLevel > 0
-                ? `⚠️ Lv.${vc.deafenAllowedLevel} altındaki üyeler kulaklık kapatınca XP kazanamaz`
-                : '✅ Tüm seviyeler kulaklık kapalıyken XP kazanabilir',
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: '👤 Solo (Tek Kişi) Kuralı',
-            value: [
-              `**İzin Seviyesi:** Lv.${vc.soloXpLevel || 0}`,
-              `**Min. Kişi Sayısı:** ${vc.minUsersForXp || 2}`,
-              vc.soloXpLevel > 0
-                ? `⚠️ Lv.${vc.soloXpLevel} altındaki üyeler odada tek başınayken XP kazanamaz`
-                : `✅ Odada ${vc.minUsersForXp || 2}+ kişi olduğunda herkes XP kazanır`,
-            ].join('\n'),
-            inline: false,
-          },
-          {
-            name: '💤 AFK Kuralı',
-            value: [
-              `**AFK XP:** ${vc.afkXpAllowed ? '✅ Açık' : '❌ Kapalı'}`,
-              vc.afkXpAllowed
-                ? '⚠️ Üyeler AFK odasında da XP kazanabiliyor'
-                : '✅ AFK odasında XP kazanımı engelleniyor',
-            ].join('\n'),
-            inline: false,
-          }
+          { name: '🔇 Sessiz XP Seviyesi', value: `${guildData.voice_mute_allowed_level ?? 0}`, inline: true },
+          { name: '🔈 Sağır XP Seviyesi', value: `${guildData.voice_deafen_allowed_level ?? 0}`, inline: true },
+          { name: '🔀 Ses Hop Limiti', value: `${guildData.anti_spam_voice_hop_limit ?? 'Ayarlanmadı'}`, inline: true },
+          { name: '📨 Spam Mesaj Limiti', value: `${guildData.anti_spam_max_messages ?? 'Ayarlanmadı'}`, inline: true },
         )
-        .setFooter({ text: 'Evil Mega Corp // Admin Panel' })
+        .setFooter({ text: 'Evil Mega Corp // Kurallar' })
         .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-
-    if (sub === 'sifirla') {
-      guildData.voiceConditions = {
-        muteAllowedLevel: 0,
-        deafenAllowedLevel: 0,
-        soloXpLevel: 0,
-        afkXpAllowed: false,
-        minUsersForXp: 2,
-      };
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Ses Koşulları Sıfırlandı',
-        description: 'Tüm ses koşulları fabrika ayarlarına döndürüldü.',
-        operatorId: interaction.user.id,
-      });
-
-      return interaction.reply({ content: '✅ Tüm ses koşulları fabrika ayarlarına sıfırlandı.', ephemeral: true });
     }
   },
 };

@@ -1,8 +1,6 @@
-const { grantVoiceXP, applyTax } = require('../systems/xpEngine');
-const { log, LogTier } = require('../utils/logger');
-const Guild = require('../models/Guild');
-const User = require('../models/User');
-const config = require('../config');
+const { grantVoiceXP } = require('../systems/xpEngine');
+const antiSpam = require('../systems/antiSpam');
+const cache = require('../cache/manager');
 
 module.exports = {
   name: 'voiceStateUpdate',
@@ -10,145 +8,81 @@ module.exports = {
     const member = newState.member || oldState.member;
     if (!member || member.user.bot) return;
 
-    const guildId = (newState.guild || oldState.guild).id;
-    const sessionKey = `voice_${member.id}_${guildId}`;
+    const guildId = newState.guild?.id || oldState.guild?.id;
+    if (!guildId) return;
 
-    // --- Kanaldan ayrilma veya kanal degistirme ---
-    if (oldState.channelId && oldState.channelId !== newState.channelId) {
-      const session = client.voiceSessions.get(sessionKey);
-      if (session) {
-        const elapsed = Date.now() - session.joinedAt;
-        const minutes = Math.floor(elapsed / 60_000);
+    const userId = member.id;
+    const sessionKey = `${userId}_${guildId}`;
 
-        if (minutes > 0 && !session.afk) {
-          // Seviye bazli ses kosullari kontrolu
-          const guildData = await Guild.findOne({ guildId });
-          const userData = await User.findOne({ userId: member.id, guildId });
-          const voiceLevel = userData?.levelVoice || 0;
-          const vc = guildData?.voiceConditions || {};
-
-          let effectiveMinutes = minutes;
-          let blocked = false;
-
-          // Deafen kontrolu - seviye bazli
-          if (session.deafened) {
-            if (voiceLevel < (vc.deafenAllowedLevel || 0)) {
-              effectiveMinutes = 0;
-              blocked = true;
-            } else {
-              effectiveMinutes = Math.floor(minutes * config.tax.deafPenaltyMultiplier);
-            }
-          }
-          // Mute kontrolu - seviye bazli
-          else if (session.muted) {
-            if (voiceLevel < (vc.muteAllowedLevel || 0)) {
-              effectiveMinutes = 0;
-              blocked = true;
-            } else {
-              effectiveMinutes = Math.floor(minutes * config.tax.mutePenaltyMultiplier);
-            }
-          }
-
-          // Solo kontrolu - odada tek kisi
-          if (session.soloTime > 0 && voiceLevel < (vc.soloXpLevel || 0)) {
-            effectiveMinutes = Math.max(0, effectiveMinutes - session.soloTime);
-          }
-
-          if (effectiveMinutes > 0 && !blocked) {
-            await grantVoiceXP(member, client, effectiveMinutes);
-          }
-
-          // Vergi uygula (AFK suresi varsa)
-          if (session.afkMinutes > 0) {
-            const taxAmount = session.afkMinutes * config.tax.afkPenaltyPerMinute;
-            await applyTax(client, member, 'AFK süresi vergilendirmesi', taxAmount);
-          }
-        }
-
-        client.voiceSessions.delete(sessionKey);
-      }
-    }
-
-    // --- Kanala katilma ---
-    if (newState.channelId && oldState.channelId !== newState.channelId) {
-      const guild = newState.guild;
-      const isAfk = guild.afkChannelId && newState.channelId === guild.afkChannelId;
-
-      if (isAfk) {
-        await log(client, guildId, LogTier.PERSONNEL, {
-          title: 'XP Kazanım Durduruldu',
-          description: `**${member.user.tag}** AFK odasına girdi. XP kazanımı durduruldu.`,
-          targetId: member.id,
-          channelId: newState.channelId,
-        });
-      }
-
-      // Anti-spam: Voice hop kontrolu
-      const guildData = await Guild.findOne({ guildId });
-      if (guildData?.antiSpam?.enabled) {
-        const hopKey = `vhop_${member.id}_${guildId}`;
-        const hopData = client.cooldowns.get(hopKey) || { count: 0, resetAt: Date.now() + (guildData.antiSpam.voiceHopWindow || 60_000) };
-        if (Date.now() > hopData.resetAt) {
-          hopData.count = 0;
-          hopData.resetAt = Date.now() + (guildData.antiSpam.voiceHopWindow || 60_000);
-        }
-        hopData.count++;
-        client.cooldowns.set(hopKey, hopData);
-
-        if (hopData.count > (guildData.antiSpam.voiceHopLimit || 5)) {
-          await log(client, guildId, LogTier.SECURITY, {
-            title: 'Anti-Spam: Ses Odası Manipülasyonu',
-            description: `**${member.user.tag}** hızlı kanal değiştirme limiti aştı.`,
-            targetId: member.id,
-            channelId: newState.channelId,
-          });
-        }
-      }
-
-      // Odadaki kisi sayisini kontrol et
-      const channelMembers = newState.channel?.members.filter(m => !m.user.bot).size || 0;
-
+    // Kanala katildi
+    if (!oldState.channel && newState.channel) {
       client.voiceSessions.set(sessionKey, {
         joinedAt: Date.now(),
-        channelId: newState.channelId,
-        muted: newState.selfMute || newState.serverMute,
-        deafened: newState.selfDeaf || newState.serverDeaf,
-        afk: isAfk,
-        afkMinutes: 0,
-        soloTime: 0, // Tek basina gecirilen dakika
+        channelId: newState.channel.id,
+        lastXpAt: Date.now(),
       });
+      return;
     }
 
-    // --- Mute/Deafen durum degisimi ---
-    if (newState.channelId && oldState.channelId === newState.channelId) {
+    // Kanaldan ayrildi
+    if (oldState.channel && !newState.channel) {
       const session = client.voiceSessions.get(sessionKey);
       if (session) {
-        const wasMuted = session.muted;
-        const wasDeafened = session.deafened;
-        session.muted = newState.selfMute || newState.serverMute;
-        session.deafened = newState.selfDeaf || newState.serverDeaf;
+        const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
+        if (minutes >= 1) {
+          const guildData = await cache.getGuild(guildId);
+          const minUsers = guildData?.voice_min_users || 2;
+          const channelMembers = oldState.channel.members.filter(m => !m.user.bot).size;
 
-        // Mikrofon kapattiysa logla
-        if (!wasMuted && session.muted) {
-          await log(client, guildId, LogTier.PERSONNEL, {
-            title: 'XP Kazanım Durduruldu',
-            description: `**${member.user.tag}** mikrofonunu kapattı. XP çarpanı düşürüldü.`,
-            targetId: member.id,
-            channelId: newState.channelId,
-          });
+          if (channelMembers >= minUsers || (guildData?.voice_afk_xp_allowed && oldState.channel.id === oldState.guild.afkChannelId)) {
+            await grantVoiceXP(member, client, minutes, oldState);
+          }
         }
+        client.voiceSessions.delete(sessionKey);
+      }
+      return;
+    }
 
-        // Kulaklik kapattiysa logla
-        if (!wasDeafened && session.deafened) {
-          await log(client, guildId, LogTier.PERSONNEL, {
-            title: 'XP Kazanım Durduruldu',
-            description: `**${member.user.tag}** kulaklığını kapattı (Deafen). XP kazanımı durduruldu.`,
-            targetId: member.id,
-            channelId: newState.channelId,
-          });
+    // Kanal degistirdi
+    if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+      // Voice hop kontrolu
+      const guildData = await cache.getGuild(guildId);
+      if (guildData?.anti_spam_enabled) {
+        const isHopping = antiSpam.checkVoiceHop(userId, guildId, guildData);
+        if (isHopping) return;
+      }
+
+      // Eski kanaldan XP ver
+      const session = client.voiceSessions.get(sessionKey);
+      if (session) {
+        const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
+        if (minutes >= 1) {
+          await grantVoiceXP(member, client, minutes, oldState);
         }
+      }
 
-        client.voiceSessions.set(sessionKey, session);
+      // Yeni oturum baslat
+      client.voiceSessions.set(sessionKey, {
+        joinedAt: Date.now(),
+        channelId: newState.channel.id,
+        lastXpAt: Date.now(),
+      });
+      return;
+    }
+
+    // Periyodik XP verme (her dakika tetiklenir)
+    const session = client.voiceSessions.get(sessionKey);
+    if (session && newState.channel) {
+      const minutes = Math.floor((Date.now() - session.lastXpAt) / 60_000);
+      if (minutes >= 1) {
+        const guildData = await cache.getGuild(guildId);
+        const minUsers = guildData?.voice_min_users || 2;
+        const channelMembers = newState.channel.members.filter(m => !m.user.bot).size;
+
+        if (channelMembers >= minUsers) {
+          await grantVoiceXP(member, client, minutes, newState);
+          session.lastXpAt = Date.now();
+        }
       }
     }
   },

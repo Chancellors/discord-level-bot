@@ -1,45 +1,21 @@
-const User = require('../models/User');
+const cache = require('../cache/manager');
+const db = require('../database/queries');
 const { log, LogTier } = require('../utils/logger');
 
 module.exports = {
   name: 'guildBanRemove',
   async execute(ban, client) {
     if (ban.user.bot) return;
-
     try {
-      const guildId = ban.guild.id;
-      const userData = await User.findOne({ userId: ban.user.id, guildId });
-
+      const userData = await cache.getUser(ban.user.id, ban.guild.id);
       if (!userData) return;
 
-      // Sicil kaydina ekle
-      await User.updateOne(
-        { userId: ban.user.id, guildId },
-        {
-          $push: {
-            records: {
-              action: 'Ban Kaldırma',
-              reason: 'Sunucu banı kaldırıldı. Geri dönüşte veriler geri yüklenecek.',
-              operatorId: 'SYSTEM',
-            },
-          },
-        }
-      );
+      await db.addRecord(ban.user.id, ban.guild.id, 'Ban Kaldırma', 'Sunucu banı kaldırıldı.', 'SYSTEM');
 
-      await log(client, guildId, LogTier.PERSONNEL, {
+      await log(client, ban.guild.id, LogTier.PERSONNEL, {
         title: 'Ban Kaldırıldı — Veriler Hazır',
-        description: `**${ban.user.tag}** banı kaldırıldı. Sunucuya geri dönerse tüm verileri otomatik geri yüklenecek.`,
+        description: `**${ban.user.tag}** banı kaldırıldı. Geri dönerse verileri geri yüklenecek.`,
         targetId: ban.user.id,
-        fields: [
-          {
-            name: '📊 Korunan Veriler',
-            value: [
-              `📝 Yazı: Lv.${userData.levelText} (${userData.xpText} XP)`,
-              `🎙️ Ses: Lv.${userData.levelVoice} (${userData.xpVoice} XP)`,
-            ].join('\n'),
-            inline: true,
-          },
-        ],
       });
     } catch (err) {
       console.error('[guildBanRemove] Hata:', err.message);

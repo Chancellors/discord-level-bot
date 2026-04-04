@@ -1,342 +1,153 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType } = require('discord.js');
-const Guild = require('../../models/Guild');
-const { log, LogTier } = require('../../utils/logger');
+const cache = require('../../cache/manager');
 const config = require('../../config');
-
-const VARIABLES_WELCOME = [
-  '`[user]` — Yeni üyeyi etiketler',
-  '`[userName]` — Etiketlemeden üyenin ismi',
-  '`[memberCount]` — Ulaşılan üye sayısı',
-  '`[server]` — Sunucu ismi',
-];
-
-const VARIABLES_LEAVE = [
-  '`[user]` — Üyeyi etiketler',
-  '`[userName]` — Etiketlemeden üyenin ismi',
-  '`[memberCount]` — Güncel üye sayısı',
-  '`[server]` — Sunucu ismi',
-];
-
-function applyVariables(template, member) {
-  return template
-    .replace(/\[user\]/g, `<@${member.id}>`)
-    .replace(/\[userName\]/g, member.user?.username || member.username || 'Bilinmiyor')
-    .replace(/\[memberCount\]/g, `${member.guild.memberCount}`)
-    .replace(/\[server\]/g, member.guild.name);
-}
+const { log, LogTier } = require('../../utils/logger');
 
 module.exports = {
   category: 'admin',
   data: new SlashCommandBuilder()
     .setName('karsilayici')
-    .setDescription('Hoş geldin ve ayrılma mesaj sistemi.')
+    .setDescription('Hoş geldin ve ayrılma mesajlarını yönet.')
     .addSubcommand(sub =>
-      sub.setName('hosgeldin-durum')
-        .setDescription('Hoş geldin mesaj sistemini aç/kapat.')
-        .addBooleanOption(opt => opt.setName('aktif').setDescription('Sistem aktif mi?').setRequired(true))
-    )
-    .addSubcommand(sub =>
-      sub.setName('hosgeldin-kanal')
-        .setDescription('Hoş geldin mesajının gönderileceği kanalı ayarla.')
-        .addChannelOption(opt => opt.setName('kanal').setDescription('Hoş geldin kanalı').setRequired(true).addChannelTypes(ChannelType.GuildText))
-    )
-    .addSubcommand(sub =>
-      sub.setName('hosgeldin-mesaj')
-        .setDescription('Hoş geldin mesaj şablonunu değiştir.')
+      sub.setName('hosgeldin-ayarla')
+        .setDescription('Hoş geldin mesajını ayarla.')
+        .addChannelOption(opt => opt.setName('kanal').setDescription('Mesajın gönderileceği kanal').setRequired(true).addChannelTypes(ChannelType.GuildText))
         .addStringOption(opt => opt.setName('mesaj').setDescription('Mesaj şablonu ([user], [userName], [memberCount], [server])').setRequired(true))
-    )
+        .addBooleanOption(opt => opt.setName('dm').setDescription('DM olarak da gönderilsin mi?').setRequired(false)))
     .addSubcommand(sub =>
-      sub.setName('hosgeldin-gonder')
-        .setDescription('Hoş geldin mesajının gönderim yöntemini ayarla.')
-        .addStringOption(opt =>
-          opt.setName('yontem')
-            .setDescription('Gönderim yöntemi')
-            .setRequired(true)
-            .addChoices(
-              { name: 'Kanala Gönder', value: 'channel' },
-              { name: 'DM Olarak Gönder', value: 'dm' }
-            )
-        )
-    )
+      sub.setName('hosgeldin-ac')
+        .setDescription('Hoş geldin mesajını aktifleştir.'))
     .addSubcommand(sub =>
-      sub.setName('ayrilma-durum')
-        .setDescription('Ayrılma mesaj sistemini aç/kapat.')
-        .addBooleanOption(opt => opt.setName('aktif').setDescription('Sistem aktif mi?').setRequired(true))
-    )
+      sub.setName('hosgeldin-kapat')
+        .setDescription('Hoş geldin mesajını devre dışı bırak.'))
     .addSubcommand(sub =>
-      sub.setName('ayrilma-kanal')
-        .setDescription('Ayrılma mesajının gönderileceği kanalı ayarla.')
-        .addChannelOption(opt => opt.setName('kanal').setDescription('Ayrılma mesaj kanalı').setRequired(true).addChannelTypes(ChannelType.GuildText))
-    )
+      sub.setName('ayrilma-ayarla')
+        .setDescription('Ayrılma mesajını ayarla.')
+        .addChannelOption(opt => opt.setName('kanal').setDescription('Mesajın gönderileceği kanal').setRequired(true).addChannelTypes(ChannelType.GuildText))
+        .addStringOption(opt => opt.setName('mesaj').setDescription('Mesaj şablonu ([user], [userName], [memberCount], [server])').setRequired(true)))
     .addSubcommand(sub =>
-      sub.setName('ayrilma-mesaj')
-        .setDescription('Ayrılma mesaj şablonunu değiştir.')
-        .addStringOption(opt => opt.setName('mesaj').setDescription('Mesaj şablonu ([user], [userName], [memberCount], [server])').setRequired(true))
-    )
+      sub.setName('ayrilma-ac')
+        .setDescription('Ayrılma mesajını aktifleştir.'))
     .addSubcommand(sub =>
-      sub.setName('onizleme')
-        .setDescription('Mevcut hoş geldin ve ayrılma mesajlarının önizlemesini gösterir.')
-    )
+      sub.setName('ayrilma-kapat')
+        .setDescription('Ayrılma mesajını devre dışı bırak.'))
     .addSubcommand(sub =>
-      sub.setName('sifirla')
-        .setDescription('Tüm karşılayıcı ayarlarını varsayılana döndürür.')
-        .addStringOption(opt =>
-          opt.setName('hedef')
-            .setDescription('Neyi sıfırlayacaksınız?')
-            .setRequired(true)
-            .addChoices(
-              { name: 'Hoş Geldin Mesajı', value: 'welcome' },
-              { name: 'Ayrılma Mesajı', value: 'leave' },
-              { name: 'Tümü', value: 'all' }
-            )
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('goruntule')
-        .setDescription('Karşılayıcı sistem ayarlarını görüntüle.')
-    ),
+      sub.setName('onizle')
+        .setDescription('Mevcut hoş geldin ve ayrılma mesajlarını önizle.')),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guild.id;
+    const guildData = await cache.getGuild(guildId);
 
-    let guildData = await Guild.findOne({ guildId });
-    if (!guildData) guildData = await Guild.create({ guildId });
-
-    // --- HOSGELDIN DURUM ---
-    if (sub === 'hosgeldin-durum') {
-      const aktif = interaction.options.getBoolean('aktif');
-      guildData.welcomeEnabled = aktif;
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Hoş Geldin Durumu',
-        operatorId: interaction.user.id,
-        fields: [{ name: 'Durum', value: aktif ? '✅ Açık' : '❌ Kapalı', inline: true }],
-      });
-
-      return interaction.reply({
-        content: `✅ Hoş geldin mesaj sistemi ${aktif ? '**açıldı**' : '**kapatıldı**'}.${aktif && !guildData.welcomeChannel ? '\n⚠️ Henüz hoş geldin kanalı ayarlanmamış! `/karsilayici hosgeldin-kanal` ile ayarlayın.' : ''}`,
-        ephemeral: true,
-      });
-    }
-
-    // --- HOSGELDIN KANAL ---
-    if (sub === 'hosgeldin-kanal') {
+    if (sub === 'hosgeldin-ayarla') {
       const kanal = interaction.options.getChannel('kanal');
-      const old = guildData.welcomeChannel;
-      guildData.welcomeChannel = kanal.id;
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Hoş Geldin Kanalı',
-        operatorId: interaction.user.id,
-        fields: [
-          { name: 'Eski', value: old ? `<#${old}>` : 'Yok', inline: true },
-          { name: 'Yeni', value: kanal.toString(), inline: true },
-        ],
-      });
-
-      return interaction.reply({ content: `✅ Hoş geldin kanalı ${kanal} olarak ayarlandı.`, ephemeral: true });
-    }
-
-    // --- HOSGELDIN MESAJ ---
-    if (sub === 'hosgeldin-mesaj') {
       const mesaj = interaction.options.getString('mesaj');
-      guildData.welcomeMessage = mesaj;
-      await guildData.save();
+      const dm = interaction.options.getBoolean('dm') ?? false;
 
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Hoş Geldin Mesajı Güncellendi',
-        operatorId: interaction.user.id,
-      });
-
-      // Onizleme
-      const preview = applyVariables(mesaj, interaction.member);
-
-      return interaction.reply({
-        content: `✅ Hoş geldin mesajı güncellendi.\n\n**Önizleme:**\n${preview.substring(0, 1800)}`,
-        ephemeral: true,
-      });
-    }
-
-    // --- HOSGELDIN GONDER ---
-    if (sub === 'hosgeldin-gonder') {
-      const yontem = interaction.options.getString('yontem');
-      guildData.welcomeSendDM = yontem === 'dm';
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Gönderim Yöntemi',
-        operatorId: interaction.user.id,
-        fields: [{ name: 'Yöntem', value: yontem === 'dm' ? 'DM Olarak Gönder' : 'Kanala Gönder', inline: true }],
-      });
-
-      return interaction.reply({
-        content: `✅ Hoş geldin mesajı ${yontem === 'dm' ? '**DM olarak**' : '**kanala**'} gönderilecek.`,
-        ephemeral: true,
-      });
-    }
-
-    // --- AYRILMA DURUM ---
-    if (sub === 'ayrilma-durum') {
-      const aktif = interaction.options.getBoolean('aktif');
-      guildData.leaveEnabled = aktif;
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Ayrılma Durumu',
-        operatorId: interaction.user.id,
-        fields: [{ name: 'Durum', value: aktif ? '✅ Açık' : '❌ Kapalı', inline: true }],
-      });
-
-      return interaction.reply({
-        content: `✅ Ayrılma mesaj sistemi ${aktif ? '**açıldı**' : '**kapatıldı**'}.${aktif && !guildData.leaveChannel ? '\n⚠️ Henüz ayrılma kanalı ayarlanmamış! `/karsilayici ayrilma-kanal` ile ayarlayın.' : ''}`,
-        ephemeral: true,
-      });
-    }
-
-    // --- AYRILMA KANAL ---
-    if (sub === 'ayrilma-kanal') {
-      const kanal = interaction.options.getChannel('kanal');
-      const old = guildData.leaveChannel;
-      guildData.leaveChannel = kanal.id;
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Ayrılma Kanalı',
-        operatorId: interaction.user.id,
-        fields: [
-          { name: 'Eski', value: old ? `<#${old}>` : 'Yok', inline: true },
-          { name: 'Yeni', value: kanal.toString(), inline: true },
-        ],
-      });
-
-      return interaction.reply({ content: `✅ Ayrılma mesaj kanalı ${kanal} olarak ayarlandı.`, ephemeral: true });
-    }
-
-    // --- AYRILMA MESAJ ---
-    if (sub === 'ayrilma-mesaj') {
-      const mesaj = interaction.options.getString('mesaj');
-      guildData.leaveMessage = mesaj;
-      await guildData.save();
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Ayrılma Mesajı Güncellendi',
-        operatorId: interaction.user.id,
-      });
-
-      const preview = applyVariables(mesaj, interaction.member);
-
-      return interaction.reply({
-        content: `✅ Ayrılma mesajı güncellendi.\n\n**Önizleme:**\n${preview.substring(0, 1800)}`,
-        ephemeral: true,
-      });
-    }
-
-    // --- ONIZLEME ---
-    if (sub === 'onizleme') {
-      const welcomePreview = applyVariables(guildData.welcomeMessage, interaction.member);
-      const leavePreview = applyVariables(guildData.leaveMessage, interaction.member);
+      guildData.welcome_channel = kanal.id;
+      guildData.welcome_message = mesaj;
+      guildData.welcome_send_dm = dm;
+      cache.setGuild(guildId, guildData);
 
       const embed = new EmbedBuilder()
-        .setColor(config.colors.info)
-        .setTitle('👁️ Evil Mega Corp // Karşılayıcı Önizleme')
+        .setColor(config.colors.operational)
+        .setTitle('✅ Hoş Geldin Mesajı Ayarlandı')
         .addFields(
-          {
-            name: `${guildData.welcomeEnabled ? '✅' : '❌'} Hoş Geldin Mesajı`,
-            value: welcomePreview.substring(0, 1024),
-            inline: false,
-          },
-          {
-            name: `${guildData.leaveEnabled ? '✅' : '❌'} Ayrılma Mesajı`,
-            value: leavePreview.substring(0, 1024),
-            inline: false,
-          },
-          {
-            name: '⚙️ Ayarlar',
-            value: [
-              `**Hoş Geldin Kanalı:** ${guildData.welcomeChannel ? `<#${guildData.welcomeChannel}>` : '❌ Ayarlanmamış'}`,
-              `**Gönderim:** ${guildData.welcomeSendDM ? 'DM' : 'Kanal'}`,
-              `**Ayrılma Kanalı:** ${guildData.leaveChannel ? `<#${guildData.leaveChannel}>` : '❌ Ayarlanmamış'}`,
-            ].join('\n'),
-            inline: false,
-          }
+          { name: '📢 Kanal', value: `${kanal}`, inline: true },
+          { name: '📨 DM', value: dm ? 'Evet' : 'Hayır', inline: true },
+          { name: '💬 Mesaj', value: `\`${mesaj}\``, inline: false },
         )
-        .addFields({
-          name: '📌 Kullanılabilir Değişkenler',
-          value: VARIABLES_WELCOME.join('\n'),
-          inline: false,
-        })
-        .setFooter({ text: 'Evil Mega Corp // Admin Panel' })
+        .setFooter({ text: 'Evil Mega Corp // Karşılayıcı' })
         .setTimestamp();
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    }
+      await interaction.reply({ embeds: [embed], ephemeral: true });
 
-    // --- SIFIRLA ---
-    if (sub === 'sifirla') {
-      const hedef = interaction.options.getString('hedef');
-
-      // Varsayilan mesajlari Guild modelinden al
-      const defaults = new Guild().toObject();
-
-      if (hedef === 'welcome' || hedef === 'all') {
-        guildData.welcomeMessage = defaults.welcomeMessage;
-        guildData.welcomeEnabled = false;
-        guildData.welcomeChannel = null;
-        guildData.welcomeSendDM = false;
-      }
-
-      if (hedef === 'leave' || hedef === 'all') {
-        guildData.leaveMessage = defaults.leaveMessage;
-        guildData.leaveEnabled = false;
-        guildData.leaveChannel = null;
-      }
-
-      await guildData.save();
-
-      const hedefText = { welcome: 'Hoş geldin', leave: 'Ayrılma', all: 'Tüm karşılayıcı' };
-
-      await log(interaction.client, guildId, LogTier.OPERATIONAL, {
-        title: 'Karşılayıcı: Ayarlar Sıfırlandı',
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Hoş Geldin Mesajı Ayarlandı',
+        description: `Kanal: ${kanal.name}, DM: ${dm}`,
         operatorId: interaction.user.id,
-        fields: [{ name: 'Hedef', value: hedefText[hedef], inline: true }],
       });
-
-      return interaction.reply({
-        content: `✅ ${hedefText[hedef]} ayarları varsayılana döndürüldü ve devre dışı bırakıldı.`,
-        ephemeral: true,
-      });
+      return;
     }
 
-    // --- GORUNTULE ---
-    if (sub === 'goruntule') {
+    if (sub === 'hosgeldin-ac') {
+      guildData.welcome_enabled = true;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: '✅ Hoş geldin mesajı **aktifleştirildi**.', ephemeral: true });
+      return;
+    }
+
+    if (sub === 'hosgeldin-kapat') {
+      guildData.welcome_enabled = false;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: '✅ Hoş geldin mesajı **devre dışı bırakıldı**.', ephemeral: true });
+      return;
+    }
+
+    if (sub === 'ayrilma-ayarla') {
+      const kanal = interaction.options.getChannel('kanal');
+      const mesaj = interaction.options.getString('mesaj');
+
+      guildData.leave_channel = kanal.id;
+      guildData.leave_message = mesaj;
+      cache.setGuild(guildId, guildData);
+
+      const embed = new EmbedBuilder()
+        .setColor(config.colors.operational)
+        .setTitle('✅ Ayrılma Mesajı Ayarlandı')
+        .addFields(
+          { name: '📢 Kanal', value: `${kanal}`, inline: true },
+          { name: '💬 Mesaj', value: `\`${mesaj}\``, inline: false },
+        )
+        .setFooter({ text: 'Evil Mega Corp // Karşılayıcı' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+
+      log(client, guildId, LogTier.OPERATIONAL, {
+        title: 'Ayrılma Mesajı Ayarlandı',
+        description: `Kanal: ${kanal.name}`,
+        operatorId: interaction.user.id,
+      });
+      return;
+    }
+
+    if (sub === 'ayrilma-ac') {
+      guildData.leave_enabled = true;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: '✅ Ayrılma mesajı **aktifleştirildi**.', ephemeral: true });
+      return;
+    }
+
+    if (sub === 'ayrilma-kapat') {
+      guildData.leave_enabled = false;
+      cache.setGuild(guildId, guildData);
+      await interaction.reply({ content: '✅ Ayrılma mesajı **devre dışı bırakıldı**.', ephemeral: true });
+      return;
+    }
+
+    if (sub === 'onizle') {
+      const formatPreview = (template, guild, user) => {
+        if (!template) return '*Ayarlanmamış*';
+        return template
+          .replace(/\[user\]/g, `${user}`)
+          .replace(/\[userName\]/g, user.username)
+          .replace(/\[memberCount\]/g, `${guild.memberCount}`)
+          .replace(/\[server\]/g, guild.name);
+      };
+
+      const welcomePreview = formatPreview(guildData.welcome_message, interaction.guild, interaction.user);
+      const leavePreview = formatPreview(guildData.leave_message, interaction.guild, interaction.user);
+
       const embed = new EmbedBuilder()
         .setColor(config.colors.info)
-        .setTitle('📋 Evil Mega Corp // Karşılayıcı Ayarları')
+        .setTitle('👁️ Evil Mega Corp // Mesaj Önizleme')
         .addFields(
-          {
-            name: '👋 Hoş Geldin Sistemi',
-            value: [
-              `**Durum:** ${guildData.welcomeEnabled ? '✅ Açık' : '❌ Kapalı'}`,
-              `**Kanal:** ${guildData.welcomeChannel ? `<#${guildData.welcomeChannel}>` : '❌ Ayarlanmamış'}`,
-              `**Gönderim:** ${guildData.welcomeSendDM ? '📬 DM' : '📢 Kanal'}`,
-              `**Mesaj Uzunluğu:** ${guildData.welcomeMessage?.length || 0} karakter`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '🚪 Ayrılma Sistemi',
-            value: [
-              `**Durum:** ${guildData.leaveEnabled ? '✅ Açık' : '❌ Kapalı'}`,
-              `**Kanal:** ${guildData.leaveChannel ? `<#${guildData.leaveChannel}>` : '❌ Ayarlanmamış'}`,
-              `**Mesaj Uzunluğu:** ${guildData.leaveMessage?.length || 0} karakter`,
-            ].join('\n'),
-            inline: true,
-          }
+          { name: '👋 Hoş Geldin', value: `**Durum:** ${guildData.welcome_enabled ? 'Aktif' : 'Devre dışı'}\n**Kanal:** ${guildData.welcome_channel ? `<#${guildData.welcome_channel}>` : 'Ayarlanmadı'}\n**DM:** ${guildData.welcome_send_dm ? 'Evet' : 'Hayır'}\n**Önizleme:**\n${welcomePreview}`, inline: false },
+          { name: '🚪 Ayrılma', value: `**Durum:** ${guildData.leave_enabled ? 'Aktif' : 'Devre dışı'}\n**Kanal:** ${guildData.leave_channel ? `<#${guildData.leave_channel}>` : 'Ayarlanmadı'}\n**Önizleme:**\n${leavePreview}`, inline: false },
         )
-        .setFooter({ text: 'Evil Mega Corp // Admin Panel' })
+        .setFooter({ text: 'Evil Mega Corp // Karşılayıcı Önizleme' })
         .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });

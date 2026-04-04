@@ -1,21 +1,20 @@
 {
   "name": "evil-mega-corp-bot",
-  "version": "1.0.0",
-  "description": "Evil Mega Corp - Surveillance & Authority Discord Level Bot",
+  "version": "2.0.0",
+  "description": "Evil Mega Corp — Discord Seviye ve Uye Izleme Sistemi",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "deploy": "node src/deploy-commands.js"
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop evil-mega-corp",
+    "pm2:restart": "pm2 restart evil-mega-corp",
+    "pm2:logs": "pm2 logs evil-mega-corp"
   },
   "dependencies": {
-    "@discordjs/rest": "^2.4.0",
-    "canvas": "^2.11.2",
     "discord.js": "^14.16.3",
+    "pg": "^8.13.1",
     "dotenv": "^16.4.5",
-    "mongoose": "^8.8.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.7"
+    "canvas": "^2.11.2",
+    "@discordjs/rest": "^2.4.0"
   }
 }

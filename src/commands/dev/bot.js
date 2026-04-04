@@ -1,244 +1,128 @@
-const { SlashCommandBuilder, EmbedBuilder, ActivityType, version } = require('discord.js');
-const { log, LogTier } = require('../../utils/logger');
+const { SlashCommandBuilder, EmbedBuilder, ActivityType } = require('discord.js');
 const config = require('../../config');
-const mongoose = require('mongoose');
-const User = require('../../models/User');
-const Guild = require('../../models/Guild');
-const os = require('os');
+const { isDev } = require('../../utils/permissions');
+
+const ACTIVITY_MAP = {
+  izliyor: ActivityType.Watching,
+  dinliyor: ActivityType.Listening,
+  oynuyor: ActivityType.Playing,
+  yarisiyor: ActivityType.Competing,
+};
 
 module.exports = {
   category: 'dev',
   data: new SlashCommandBuilder()
     .setName('bot')
-    .setDescription('Bot profil ve aktivite yönetimi.')
+    .setDescription('Bot yonetim komutlari.')
     .addSubcommand(sub =>
       sub.setName('durum')
-        .setDescription('Bot durumunu değiştir.')
+        .setDescription('Bot aktivitesini ayarla.')
+        .addStringOption(opt => opt.setName('aktivite').setDescription('Aktivite metni').setRequired(true))
         .addStringOption(opt =>
-          opt.setName('tip')
-            .setDescription('Durum tipi')
-            .setRequired(true)
+          opt.setName('tip').setDescription('Aktivite tipi').setRequired(true)
             .addChoices(
-              { name: 'Çevrimiçi', value: 'online' },
-              { name: 'Boşta', value: 'idle' },
-              { name: 'Rahatsız Etmeyin', value: 'dnd' },
-              { name: 'Görünmez', value: 'invisible' }
-            )
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('etkinlik')
-        .setDescription('Bot aktivitesini değiştir.')
-        .addStringOption(opt =>
-          opt.setName('tip')
-            .setDescription('Aktivite tipi')
-            .setRequired(true)
-            .addChoices(
-              { name: 'İzliyor', value: 'watching' },
-              { name: 'Oynuyor', value: 'playing' },
-              { name: 'Dinliyor', value: 'listening' },
-              { name: 'Yarışıyor', value: 'competing' }
-            )
-        )
-        .addStringOption(opt => opt.setName('metin').setDescription('Aktivite metni').setRequired(true))
-    )
+              { name: 'Izliyor', value: 'izliyor' },
+              { name: 'Dinliyor', value: 'dinliyor' },
+              { name: 'Oynuyor', value: 'oynuyor' },
+              { name: 'Yarisiyor', value: 'yarisiyor' },
+            )))
     .addSubcommand(sub =>
       sub.setName('bilgi')
-        .setDescription('Detaylı bot ve altyapı bilgileri.')
-    )
-    .addSubcommand(sub =>
-      sub.setName('ping')
-        .setDescription('Bot gecikme sürelerini ölç.')
-    )
+        .setDescription('Bot hakkinda genel bilgi.'))
     .addSubcommand(sub =>
       sub.setName('sunucular')
-        .setDescription('Botun bulunduğu tüm sunucuların listesi.')
-    ),
+        .setDescription('Botun bulundugu sunuculari listele.'))
+    .addSubcommand(sub =>
+      sub.setName('ping')
+        .setDescription('WebSocket ve API gecikme suresi.')),
 
   async execute(interaction, client) {
+    if (!isDev(interaction.user.id)) {
+      return interaction.reply({ content: '`ERISIM REDDEDILDI` // Yetkiniz yok.', ephemeral: true });
+    }
+
     const sub = interaction.options.getSubcommand();
 
+    // ── durum ──
     if (sub === 'durum') {
+      const aktivite = interaction.options.getString('aktivite');
       const tip = interaction.options.getString('tip');
-      client.user.setStatus(tip);
 
-      const statusNames = { online: 'Çevrimiçi', idle: 'Boşta', dnd: 'Rahatsız Etmeyin', invisible: 'Görünmez' };
+      client.user.setActivity(aktivite, { type: ACTIVITY_MAP[tip] });
 
-      await log(client, interaction.guild.id, LogTier.SHADOW, {
-        title: 'Bot Durumu Değiştirildi',
-        operatorId: interaction.user.id,
-        fields: [{ name: 'Yeni Durum', value: statusNames[tip], inline: true }],
-      });
+      const embed = new EmbedBuilder()
+        .setColor(config.colors.operational)
+        .setTitle('`BOT DURUMU GUNCELLENDI`')
+        .setDescription(`Aktivite: **${tip.charAt(0).toUpperCase() + tip.slice(1)}** — ${aktivite}`)
+        .setFooter({ text: 'Evil Mega Corp // Bot Yonetimi' })
+        .setTimestamp();
 
-      return interaction.reply({ content: `✅ Bot durumu **${statusNames[tip]}** olarak ayarlandı.`, ephemeral: true });
+      return interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    if (sub === 'etkinlik') {
-      const tip = interaction.options.getString('tip');
-      const metin = interaction.options.getString('metin');
-
-      const typeMap = {
-        watching: ActivityType.Watching,
-        playing: ActivityType.Playing,
-        listening: ActivityType.Listening,
-        competing: ActivityType.Competing,
-      };
-
-      const tipNames = { watching: 'İzliyor', playing: 'Oynuyor', listening: 'Dinliyor', competing: 'Yarışıyor' };
-
-      client.user.setActivity(metin, { type: typeMap[tip] });
-
-      await log(client, interaction.guild.id, LogTier.SHADOW, {
-        title: 'Bot Etkinliği Değiştirildi',
-        operatorId: interaction.user.id,
-        fields: [
-          { name: 'Tip', value: tipNames[tip], inline: true },
-          { name: 'Metin', value: metin, inline: true },
-        ],
-      });
-
-      return interaction.reply({ content: `✅ Bot etkinliği: **${tipNames[tip]}** — ${metin}`, ephemeral: true });
-    }
-
+    // ── bilgi ──
     if (sub === 'bilgi') {
-      await interaction.deferReply({ ephemeral: true });
-
+      const guilds = client.guilds.cache;
+      const totalMembers = guilds.reduce((acc, g) => acc + g.memberCount, 0);
+      const totalChannels = guilds.reduce((acc, g) => acc + g.channels.cache.size, 0);
       const uptime = process.uptime();
       const hours = Math.floor(uptime / 3600);
       const minutes = Math.floor((uptime % 3600) / 60);
       const seconds = Math.floor(uptime % 60);
 
-      const totalUsers = await User.countDocuments();
-      const totalGuilds = await Guild.countDocuments();
-      const memUsage = process.memoryUsage();
-
-      const dbStatus = mongoose.connection.readyState;
-      const dbStatusText = { 0: '❌ Bağlantı Yok', 1: '✅ Bağlı', 2: '🔄 Bağlanıyor', 3: '⚠️ Kesiliyor' };
-
-      // Oturum bilgileri
-      const voiceSessions = client.voiceSessions?.size || 0;
-      const cooldowns = client.cooldowns?.size || 0;
-      const ghostCount = client.ghostMode?.size || 0;
-
-      const embed = new EmbedBuilder()
-        .setColor(config.colors.prestige)
-        .setTitle('🏢 Evil Mega Corp // Bot Detay Raporu')
-        .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
-        .addFields(
-          {
-            name: '🤖 Kimlik',
-            value: [
-              `**Ad:** ${client.user.tag}`,
-              `**ID:** ${client.user.id}`,
-              `**Oluşturma:** <t:${Math.floor(client.user.createdTimestamp / 1000)}:R>`,
-              `**Çalışma Süresi:** ${hours}s ${minutes}dk ${seconds}sn`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '📊 İstatistikler',
-            value: [
-              `**Sunucu:** ${client.guilds.cache.size}`,
-              `**Kullanıcı (cache):** ${client.users.cache.size}`,
-              `**Kanal (cache):** ${client.channels.cache.size}`,
-              `**Kayıtlı (DB):** ${totalUsers} kullanıcı / ${totalGuilds} sunucu`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '🛠️ Motor',
-            value: [
-              `**Discord.js:** v${version}`,
-              `**Node.js:** ${process.version}`,
-              `**OS:** ${os.platform()} ${os.arch()}`,
-              `**MongoDB:** ${dbStatusText[dbStatus]}`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '💻 Kaynak Kullanımı',
-            value: [
-              `**Heap:** ${(memUsage.heapUsed / 1024 / 1024).toFixed(1)} / ${(memUsage.heapTotal / 1024 / 1024).toFixed(1)} MB`,
-              `**RSS:** ${(memUsage.rss / 1024 / 1024).toFixed(1)} MB`,
-              `**Sistem RAM:** ${(os.freemem() / 1024 / 1024 / 1024).toFixed(1)} / ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '⚙️ Çalışma Durumu',
-            value: [
-              `**Bakım Modu:** ${client.maintenanceMode ? '🔧 AKTİF' : '✅ Kapalı'}`,
-              `**Ses Oturumları:** ${voiceSessions}`,
-              `**Cooldown Kayıtları:** ${cooldowns}`,
-              `**Ghost Mode:** ${ghostCount} dev`,
-              `**Komut Sayısı:** ${client.commands.size}`,
-              `**Ping:** ${client.ws.ping}ms`,
-            ].join('\n'),
-            inline: true,
-          }
-        )
-        .setFooter({ text: 'Evil Mega Corp // Shadow Authority Division' })
-        .setTimestamp();
-
-      return interaction.editReply({ embeds: [embed] });
-    }
-
-    if (sub === 'ping') {
-      const start = Date.now();
-      await interaction.deferReply({ ephemeral: true });
-      const apiLatency = Date.now() - start;
-      const wsLatency = client.ws.ping;
-
-      // DB ping
-      let dbLatency = -1;
-      try {
-        const dbStart = Date.now();
-        await mongoose.connection.db.admin().ping();
-        dbLatency = Date.now() - dbStart;
-      } catch { /* ignore */ }
-
-      const getIndicator = (ms) => {
-        if (ms < 0) return '❓';
-        if (ms < 100) return '🟢';
-        if (ms < 250) return '🟡';
-        return '🔴';
-      };
-
       const embed = new EmbedBuilder()
         .setColor(config.colors.info)
-        .setTitle('🏓 Evil Mega Corp // Ping Raporu')
+        .setTitle('`BOT BILGI RAPORU`')
+        .setThumbnail(client.user.displayAvatarURL())
         .addFields(
-          { name: `${getIndicator(apiLatency)} API Gecikme`, value: `**${apiLatency}ms**`, inline: true },
-          { name: `${getIndicator(wsLatency)} WebSocket`, value: `**${wsLatency}ms**`, inline: true },
-          { name: `${getIndicator(dbLatency)} MongoDB`, value: dbLatency >= 0 ? `**${dbLatency}ms**` : '**N/A**', inline: true },
+          { name: 'Sunucu', value: `${guilds.size}`, inline: true },
+          { name: 'Toplam Uye', value: `${totalMembers.toLocaleString('tr-TR')}`, inline: true },
+          { name: 'Kanal', value: `${totalChannels}`, inline: true },
+          { name: 'Komut Sayisi', value: `${client.commands.size}`, inline: true },
+          { name: 'Calisma Suresi', value: `${hours}s ${minutes}d ${seconds}sn`, inline: true },
+          { name: 'WS Ping', value: `${client.ws.ping}ms`, inline: true },
         )
-        .setFooter({ text: 'Evil Mega Corp // Shadow Authority' })
-        .setTimestamp();
-
-      return interaction.editReply({ embeds: [embed] });
-    }
-
-    if (sub === 'sunucular') {
-      const guilds = client.guilds.cache
-        .sort((a, b) => b.memberCount - a.memberCount)
-        .map((g, i) => `**${i + 1}.** ${g.name} — ${g.memberCount} üye`)
-        .slice(0, 25);
-
-      const totalMembers = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
-
-      const embed = new EmbedBuilder()
-        .setColor(config.colors.info)
-        .setTitle('🌐 Evil Mega Corp // Sunucu Listesi')
-        .setDescription(guilds.join('\n') || 'Sunucu yok.')
-        .addFields({
-          name: '📈 Toplam',
-          value: `**${client.guilds.cache.size}** sunucu, **${totalMembers}** toplam üye`,
-          inline: false,
-        })
-        .setFooter({ text: 'Evil Mega Corp // Shadow Authority' })
+        .setFooter({ text: 'Evil Mega Corp // Sistem Istihbarati' })
         .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ── sunucular ──
+    if (sub === 'sunucular') {
+      const guilds = client.guilds.cache
+        .sort((a, b) => b.memberCount - a.memberCount)
+        .map((g, i) => `**${g.name}** — ${g.memberCount.toLocaleString('tr-TR')} uye`);
+
+      const lines = guilds.slice(0, 25);
+      const description = lines.join('\n') + (guilds.length > 25 ? `\n\n...ve ${guilds.length - 25} sunucu daha.` : '');
+
+      const embed = new EmbedBuilder()
+        .setColor(config.colors.info)
+        .setTitle('`SUNUCU LISTESI`')
+        .setDescription(description || 'Sunucu bulunamadi.')
+        .setFooter({ text: `Evil Mega Corp // Toplam: ${guilds.length} sunucu` })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ── ping ──
+    if (sub === 'ping') {
+      const sent = await interaction.reply({ content: '`Olculuyor...`', ephemeral: true, fetchReply: true });
+      const apiLatency = sent.createdTimestamp - interaction.createdTimestamp;
+
+      const embed = new EmbedBuilder()
+        .setColor(config.colors.info)
+        .setTitle('`GECIKME RAPORU`')
+        .addFields(
+          { name: 'WebSocket Heartbeat', value: `${client.ws.ping}ms`, inline: true },
+          { name: 'API Gecikmesi', value: `${apiLatency}ms`, inline: true },
+        )
+        .setFooter({ text: 'Evil Mega Corp // Ag Izleme' })
+        .setTimestamp();
+
+      return interaction.editReply({ content: null, embeds: [embed] });
     }
   },
 };

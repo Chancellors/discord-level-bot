@@ -1,44 +1,14 @@
-const Guild = require('../models/Guild');
-const User = require('../models/User');
+const cache = require('../cache/manager');
+const db = require('../database/queries');
 const { log, LogTier } = require('../utils/logger');
 const { markLegitimate } = require('../systems/roleGuard');
 
-/**
- * Karsilayici degiskenlerini uygula
- */
-function applyWelcomeVars(template, member) {
-  return template
+function applyVars(template, member) {
+  return (template || '')
     .replace(/\[user\]/g, `<@${member.id}>`)
     .replace(/\[userName\]/g, member.user.username)
     .replace(/\[memberCount\]/g, `${member.guild.memberCount}`)
     .replace(/\[server\]/g, member.guild.name);
-}
-
-/**
- * Hosgeldin mesaji gonder
- */
-async function sendWelcome(member, guildData) {
-  if (!guildData?.welcomeEnabled) return;
-  if (!guildData.welcomeMessage) return;
-
-  const message = applyWelcomeVars(guildData.welcomeMessage, member);
-
-  // DM mi kanala mi?
-  if (guildData.welcomeSendDM) {
-    try {
-      await member.send(message);
-    } catch {
-      // DM kapali olabilir, kanala yaz fallback
-      if (guildData.welcomeChannel) {
-        const channel = member.guild.channels.cache.get(guildData.welcomeChannel);
-        if (channel) await channel.send(message).catch(() => null);
-      }
-    }
-  } else {
-    if (!guildData.welcomeChannel) return;
-    const channel = member.guild.channels.cache.get(guildData.welcomeChannel);
-    if (channel) await channel.send(message).catch(() => null);
-  }
 }
 
 module.exports = {
@@ -48,206 +18,110 @@ module.exports = {
 
     try {
       const guildId = member.guild.id;
-      const guildData = await Guild.findOne({ guildId });
-      const userData = await User.findOne({ userId: member.id, guildId });
+      const guildData = await cache.getGuild(guildId);
+      const userData = await cache.getUser(member.id, guildId);
 
-      // --- GERI DONEN UYE TESPITI ---
-      if (userData && userData.leftAt) {
+      // GERI DONEN UYE
+      if (userData && userData.left_at) {
         const restoredRoles = [];
-        const failedRoles = [];
 
-        // 1. Onceki rolleri geri ver (lastKnownRoles)
-        if (userData.lastKnownRoles?.length) {
-          for (const roleId of userData.lastKnownRoles) {
-            const role = member.guild.roles.cache.get(roleId);
-            if (role && role.id !== guildId && !role.managed) {
-              try {
-                markLegitimate(guildId, member.id);
-                await member.roles.add(role);
-                restoredRoles.push(roleId);
-              } catch {
-                failedRoles.push(roleId);
-              }
-            } else if (!role) {
-              failedRoles.push(roleId);
-            }
+        // Onceki rolleri geri ver
+        const lastRoles = JSON.parse(userData.last_known_roles || '[]');
+        for (const roleId of lastRoles) {
+          const role = member.guild.roles.cache.get(roleId);
+          if (role && role.id !== guildId && !role.managed) {
+            try {
+              markLegitimate(guildId, member.id);
+              await member.roles.add(role);
+              restoredRoles.push(roleId);
+            } catch { /* */ }
           }
         }
 
-        // 2. Seviye rollerini kontrol et - hak ettigi en yuksek rolu ver
-        if (guildData) {
-          for (const type of ['text', 'voice']) {
-            const field = type === 'text' ? 'levelRolesText' : 'levelRolesVoice';
-            const userLevel = type === 'text' ? userData.levelText : userData.levelVoice;
-            const roleList = guildData[field] || [];
+        // Seviye rollerini kontrol et
+        const levelRoles = await db.getLevelRoles(guildId);
+        for (const type of ['ses', 'yazi']) {
+          const userLevel = type === 'ses' ? userData.level_ses : userData.level_yazi;
+          const qualified = levelRoles
+            .filter(r => {
+              const reqLevel = type === 'ses' ? r.ses_level : r.yazi_level;
+              return reqLevel !== null && userLevel >= reqLevel;
+            })
+            .sort((a, b) => (type === 'ses' ? b.ses_level - a.ses_level : b.yazi_level - a.yazi_level))[0];
 
-            if (!roleList.length) continue;
-
-            const qualifiedRole = roleList
-              .filter(r => userLevel >= r.level)
-              .sort((a, b) => b.level - a.level)[0];
-
-            if (qualifiedRole) {
-              const role = member.guild.roles.cache.get(qualifiedRole.roleId);
-              if (role && !restoredRoles.includes(qualifiedRole.roleId)) {
-                try {
-                  markLegitimate(guildId, member.id);
-                  await member.roles.add(role);
-                  restoredRoles.push(qualifiedRole.roleId);
-                } catch {
-                  failedRoles.push(qualifiedRole.roleId);
-                }
-              }
-            }
-
-            // Hak etmedigi seviye rollerini cikar
-            for (const r of roleList) {
-              if (r.roleId !== qualifiedRole?.roleId && member.roles.cache.has(r.roleId)) {
-                markLegitimate(guildId, member.id);
-                await member.roles.remove(r.roleId).catch(() => null);
-              }
-            }
+          if (qualified && !member.roles.cache.has(qualified.role_id)) {
+            markLegitimate(guildId, member.id);
+            await member.roles.add(qualified.role_id).catch(() => null);
+            restoredRoles.push(qualified.role_id);
           }
         }
 
-        // 3. Baslangic rollerini de ekle (eksikse)
-        if (guildData?.startingRoles?.length) {
-          for (const roleId of guildData.startingRoles) {
-            if (!member.roles.cache.has(roleId) && !restoredRoles.includes(roleId)) {
-              try {
-                markLegitimate(guildId, member.id);
-                await member.roles.add(roleId);
-                restoredRoles.push(roleId);
-              } catch { /* ignore */ }
-            }
-          }
+        // Baslangic rolu (0 sureli rol)
+        const startRole = levelRoles.find(r => (r.ses_sure === 0 || r.ses_sure === null) && (r.yazi_sure === 0 || r.yazi_sure === null) && r.ses_level === 0 && r.yazi_level === 0);
+        if (startRole && !member.roles.cache.has(startRole.role_id)) {
+          markLegitimate(guildId, member.id);
+          await member.roles.add(startRole.role_id).catch(() => null);
         }
 
-        // 4. Veritabanini guncelle
+        // DB guncelle
         const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
-        await User.updateOne(
-          { userId: member.id, guildId },
-          {
-            $set: {
-              leftAt: null,
-              lastLeaveReason: null,
-              lastKnownRoles: [],
-              roles: freshMember ? freshMember.roles.cache.map(r => r.id) : [],
-            },
-            $push: {
-              records: {
-                action: 'Geri Dönüş',
-                reason: `Sunucuya geri döndü. ${restoredRoles.length} rol geri verildi.`,
-                operatorId: 'SYSTEM',
-              },
-            },
-          }
-        );
+        userData.left_at = null;
+        userData.last_leave_reason = null;
+        userData.last_known_roles = '[]';
+        userData.roles = JSON.stringify(freshMember ? freshMember.roles.cache.map(r => r.id) : []);
+        cache.setUser(member.id, guildId, userData);
 
-        // 5. Ayrilma suresi hesapla
-        const awayDuration = Date.now() - new Date(userData.leftAt).getTime();
-        const awayDays = Math.floor(awayDuration / (1000 * 60 * 60 * 24));
-        const awayHours = Math.floor((awayDuration % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-
-        const fields = [
-          {
-            name: '📊 Korunan Seviyeler',
-            value: [
-              `📝 Yazı: **Lv.${userData.levelText}** (${userData.xpText} XP)`,
-              `🎙️ Ses: **Lv.${userData.levelVoice}** (${userData.xpVoice} XP)`,
-              `💬 Toplam Mesaj: ${userData.totalMessagesText}`,
-              `⏱️ Toplam Ses: ${userData.totalMinutesVoice} dk`,
-            ].join('\n'),
-            inline: true,
-          },
-          {
-            name: '🔄 Geri Yükleme',
-            value: [
-              `✅ Geri Verilen: ${restoredRoles.length} rol`,
-              failedRoles.length ? `⚠️ Başarısız: ${failedRoles.length} rol (silinmiş?)` : null,
-              `📅 Uzak Kalma: ${awayDays > 0 ? `${awayDays} gün ` : ''}${awayHours} saat`,
-              `🔢 Toplam Ayrılma: ${userData.leaveCount} kez`,
-            ].filter(Boolean).join('\n'),
-            inline: true,
-          },
-        ];
-
-        if (userData.frozen) {
-          fields.push({
-            name: '❄️ Dondurma Durumu',
-            value: 'Bu üye hâlâ **dondurulmuş** durumda. XP kazanamıyor.',
-            inline: false,
-          });
-        }
-
-        const prevReason = {
-          leave: 'Kendi isteğiyle ayrılmıştı',
-          kick: 'Sunucudan atılmıştı',
-          ban: 'Sunucudan banlanmıştı',
-        };
-
-        if (userData.lastLeaveReason) {
-          fields.push({
-            name: '📋 Önceki Ayrılma',
-            value: prevReason[userData.lastLeaveReason] || 'Bilinmiyor',
-            inline: true,
-          });
-        }
+        await db.addRecord(member.id, guildId, 'Geri Dönüş', `${restoredRoles.length} rol geri verildi.`, 'SYSTEM');
 
         await log(client, guildId, LogTier.PERSONNEL, {
           title: '🔄 Personel Geri Döndü — Veriler Geri Yüklendi',
-          description: `**${member.user.tag}** sunucuya geri döndü. Tüm seviyeleri, XP'si ve rolleri otomatik olarak geri verildi.`,
+          description: `**${member.user.tag}** sunucuya geri döndü.`,
           targetId: member.id,
-          fields,
+          fields: [
+            { name: 'Seviyeler', value: `Ses: Lv.${userData.level_ses} | Yazı: Lv.${userData.level_yazi}`, inline: true },
+            { name: 'Geri Verilen Roller', value: `${restoredRoles.length}`, inline: true },
+          ],
         });
+      } else {
+        // YENI UYE
+        const levelRoles = await db.getLevelRoles(guildId);
+        const startRole = levelRoles.find(r => r.ses_level === 0 && r.yazi_level === 0);
+        if (startRole) {
+          markLegitimate(guildId, member.id);
+          await member.roles.add(startRole.role_id).catch(() => null);
+        }
 
-        // Geri donen uye icin de hosgeldin mesaji gonder
-        await sendWelcome(member, guildData);
-        return;
+        const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
+        if (freshMember) {
+          const newUserData = await cache.getUser(member.id, guildId);
+          if (newUserData) {
+            newUserData.roles = JSON.stringify(freshMember.roles.cache.map(r => r.id));
+            cache.setUser(member.id, guildId, newUserData);
+          }
+        }
+
+        await log(client, guildId, LogTier.PERSONNEL, {
+          title: 'Yeni Personel Katıldı',
+          description: `**${member.user.tag}** sunucuya katıldı.`,
+          targetId: member.id,
+        });
       }
 
-      // --- YENI UYE (ilk kez katiliyor) ---
-
-      // Baslangic rollerini ver
-      const assignedRoles = [];
-      if (guildData?.startingRoles?.length) {
-        for (const roleId of guildData.startingRoles) {
-          try {
-            markLegitimate(guildId, member.id);
-            await member.roles.add(roleId);
-            assignedRoles.push(roleId);
-          } catch { /* ignore */ }
+      // Hosgeldin mesaji
+      if (guildData?.welcome_enabled && guildData.welcome_message) {
+        const msg = applyVars(guildData.welcome_message, member);
+        if (guildData.welcome_send_dm) {
+          await member.send(msg).catch(async () => {
+            if (guildData.welcome_channel) {
+              const ch = member.guild.channels.cache.get(guildData.welcome_channel);
+              if (ch) await ch.send(msg).catch(() => null);
+            }
+          });
+        } else if (guildData.welcome_channel) {
+          const ch = member.guild.channels.cache.get(guildData.welcome_channel);
+          if (ch) await ch.send(msg).catch(() => null);
         }
       }
-
-      // Kullanici kaydini olustur ve rolleri yedekle
-      const freshMember = await member.guild.members.fetch(member.id).catch(() => null);
-      if (freshMember) {
-        await User.findOneAndUpdate(
-          { userId: member.id, guildId },
-          {
-            $setOnInsert: { userId: member.id, guildId },
-            $set: { roles: freshMember.roles.cache.map(r => r.id) },
-          },
-          { upsert: true }
-        );
-      }
-
-      await log(client, guildId, LogTier.PERSONNEL, {
-        title: 'Yeni Personel Katıldı',
-        description: `**${member.user.tag}** sunucuya ilk kez katıldı.${assignedRoles.length ? ' Başlangıç rolleri atandı.' : ''}`,
-        targetId: member.id,
-        fields: assignedRoles.length ? [
-          {
-            name: 'Verilen Roller',
-            value: assignedRoles.map(r => `<@&${r}>`).join(', '),
-            inline: false,
-          },
-        ] : [],
-      });
-
-      // Hosgeldin mesaji gonder
-      await sendWelcome(member, guildData);
     } catch (err) {
       console.error('[guildMemberAdd] Hata:', err.message);
     }

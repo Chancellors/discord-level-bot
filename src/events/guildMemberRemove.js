@@ -1,5 +1,5 @@
-const User = require('../models/User');
-const Guild = require('../models/Guild');
+const cache = require('../cache/manager');
+const db = require('../database/queries');
 const { log, LogTier } = require('../utils/logger');
 
 module.exports = {
@@ -9,119 +9,59 @@ module.exports = {
 
     try {
       const guildId = member.guild.id;
+      const currentRoles = member.roles.cache.filter(r => r.id !== guildId).map(r => r.id);
 
-      // Mevcut rolleri kaydet (ayrilma anindaki son durum)
-      const currentRoles = member.roles.cache
-        .filter(r => r.id !== guildId) // @everyone haric
-        .map(r => r.id);
-
-      // Ayrilma sebebini audit logdan tespit et
+      // Ayrilma sebebi
       let leaveReason = 'leave';
       try {
-        // Kick kontrolu
-        const kickLogs = await member.guild.fetchAuditLogs({ type: 20, limit: 1 }); // MEMBER_KICK
+        const kickLogs = await member.guild.fetchAuditLogs({ type: 20, limit: 1 });
         const kickEntry = kickLogs.entries.first();
         if (kickEntry && kickEntry.target.id === member.id && Date.now() - kickEntry.createdTimestamp < 5000) {
           leaveReason = 'kick';
         }
-
-        // Ban kontrolu
         if (leaveReason === 'leave') {
-          const banLogs = await member.guild.fetchAuditLogs({ type: 22, limit: 1 }); // MEMBER_BAN_ADD
+          const banLogs = await member.guild.fetchAuditLogs({ type: 22, limit: 1 });
           const banEntry = banLogs.entries.first();
           if (banEntry && banEntry.target.id === member.id && Date.now() - banEntry.createdTimestamp < 5000) {
             leaveReason = 'ban';
           }
         }
-      } catch {
-        // Audit log izni yoksa 'leave' olarak birak
+      } catch { /* */ }
+
+      // Kullanici verisini koru
+      const userData = await cache.getUser(member.id, guildId);
+      if (userData) {
+        userData.left_at = new Date().toISOString();
+        userData.last_known_roles = JSON.stringify(currentRoles);
+        userData.last_leave_reason = leaveReason;
+        userData.leave_count = (userData.leave_count || 0) + 1;
+        cache.setUser(member.id, guildId, userData);
+        await cache.flushCritical(member.id, guildId);
       }
 
-      // Kullanici verisini guncelle - VERİYİ SİLME, koru
-      const userData = await User.findOneAndUpdate(
-        { userId: member.id, guildId },
-        {
-          $set: {
-            leftAt: new Date(),
-            lastKnownRoles: currentRoles,
-            lastLeaveReason: leaveReason,
-          },
-          $inc: { leaveCount: 1 },
-          $setOnInsert: { userId: member.id, guildId },
-        },
-        { upsert: true, new: true }
-      );
+      const reasonText = { leave: 'Ayrıldı', kick: 'Atıldı', ban: 'Banlandı' };
+      await db.addRecord(member.id, guildId, reasonText[leaveReason], `Sunucudan ${reasonText[leaveReason].toLowerCase()}.`, 'SYSTEM');
 
-      // Sicil kaydina ekle
-      await User.updateOne(
-        { userId: member.id, guildId },
-        {
-          $push: {
-            records: {
-              action: leaveReason === 'ban' ? 'Ban' : leaveReason === 'kick' ? 'Atılma' : 'Ayrılma',
-              reason: leaveReason === 'ban' ? 'Sunucudan banlandı' : leaveReason === 'kick' ? 'Sunucudan atıldı' : 'Sunucudan ayrıldı',
-              operatorId: 'SYSTEM',
-            },
-          },
-        }
-      );
-
-      // Ayrilma sebebine gore log tipi
-      const logTier = leaveReason === 'ban' ? LogTier.SECURITY : LogTier.PERSONNEL;
-
-      const reasonText = {
-        leave: '🚪 Kendi isteğiyle ayrıldı',
-        kick: '👢 Sunucudan atıldı',
-        ban: '🔨 Sunucudan banlandı',
-      };
-
-      const fields = [
-        { name: 'Sebep', value: reasonText[leaveReason], inline: true },
-        { name: 'Ayrılma Sayısı', value: `${userData.leaveCount}`, inline: true },
-      ];
-
-      // Seviye bilgisi varsa ekle
-      if (userData.levelText > 0 || userData.levelVoice > 0) {
-        fields.push({
-          name: 'Korunan Veriler',
-          value: [
-            `📝 Yazı: Lv.${userData.levelText} (${userData.xpText} XP)`,
-            `🎙️ Ses: Lv.${userData.levelVoice} (${userData.xpVoice} XP)`,
-            `💬 Mesaj: ${userData.totalMessagesText}`,
-            `⏱️ Ses: ${userData.totalMinutesVoice} dk`,
-          ].join('\n'),
-          inline: false,
-        });
-      }
-
-      if (currentRoles.length > 0) {
-        fields.push({
-          name: `Yedeklenen Roller (${currentRoles.length})`,
-          value: currentRoles.map(r => `<@&${r}>`).join(', ').substring(0, 1024),
-          inline: false,
-        });
-      }
-
-      await log(client, guildId, logTier, {
+      await log(client, guildId, leaveReason === 'ban' ? LogTier.SECURITY : LogTier.PERSONNEL, {
         title: 'Personel Ayrıldı — Veri Korunuyor',
-        description: `**${member.user.tag}** sunucudan ayrıldı. Tüm seviye verileri ve roller yedeklendi.`,
+        description: `**${member.user.tag}** sunucudan ayrıldı.`,
         targetId: member.id,
-        fields,
+        fields: [
+          { name: 'Sebep', value: reasonText[leaveReason], inline: true },
+          { name: 'Seviyeler', value: userData ? `Ses: Lv.${userData.level_ses} | Yazı: Lv.${userData.level_yazi}` : 'Yok', inline: true },
+        ],
       });
 
-      // --- AYRILMA MESAJI ---
-      const guildData = await Guild.findOne({ guildId });
-      if (guildData?.leaveEnabled && guildData.leaveChannel && guildData.leaveMessage) {
-        const leaveMsg = guildData.leaveMessage
+      // Ayrilma mesaji
+      const guildData = await cache.getGuild(guildId);
+      if (guildData?.leave_enabled && guildData.leave_channel && guildData.leave_message) {
+        const msg = guildData.leave_message
           .replace(/\[user\]/g, `<@${member.id}>`)
           .replace(/\[userName\]/g, member.user.username)
           .replace(/\[memberCount\]/g, `${member.guild.memberCount}`)
           .replace(/\[server\]/g, member.guild.name);
-
-        const channel = member.guild.channels.cache.get(guildData.leaveChannel);
-        if (channel) {
-          await channel.send(leaveMsg).catch(() => null);
-        }
+        const ch = member.guild.channels.cache.get(guildData.leave_channel);
+        if (ch) await ch.send(msg).catch(() => null);
       }
     } catch (err) {
       console.error('[guildMemberRemove] Hata:', err.message);
